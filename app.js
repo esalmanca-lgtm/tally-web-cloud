@@ -340,11 +340,7 @@ const dal = {
       if ((nat === "income" || nat === "expense") && date.length === 8) {
         const yr = parseInt(date.slice(0, 4));
         const mo = parseInt(date.slice(4, 6));
-        const dy = parseInt(date.slice(6, 8));
-        const nextDay = new Date(yr, mo - 1, dy + 1);
-        const nextY = nextDay.getFullYear();
-        const nextM = nextDay.getMonth() + 1;
-        const fyStartYear = nextM >= 4 ? nextY : nextY - 1;
+        const fyStartYear = mo >= 4 ? yr : yr - 1;
         const fyStartDateStr = `${fyStartYear}0401`;
 
         if (date < fyStartDateStr) {
@@ -361,6 +357,41 @@ const dal = {
     const ents = await fetchAll(() => query.eq("ledger", ledger));
     const sum = ents.reduce((acc, e) => acc + (+e.amount || 0), 0);
     return (+ledData.opening || 0) + sum;
+  },
+
+  async getLedgerOpeningForPeriod(ledger, dfrom) {
+    const { data: ledData, error: ledErr } = await sb.from("ledgers")
+      .select("opening, parent")
+      .eq("name", ledger)
+      .maybeSingle();
+    if (ledErr || !ledData) return 0;
+
+    const gmap = await getGroupNatureMap();
+    const top = ledData.parent ? topGroup(ledData.parent, gmap) : "Suspense A/c";
+    const nat = natureOfGroup(top, gmap);
+
+    const prevDate = ymd(subDaysYMD(ymd(dfrom), 1));
+
+    if (nat === "income" || nat === "expense") {
+      const yr = parseInt(ymd(dfrom).slice(0, 4));
+      const mo = parseInt(ymd(dfrom).slice(4, 6));
+      const fyStartYear = mo >= 4 ? yr : yr - 1;
+      const fyStartDateStr = `${fyStartYear}0401`;
+      
+      if (ymd(dfrom) <= fyStartDateStr) {
+        return 0;
+      }
+      
+      const query = sb.from("entries").select("amount,vouchers!inner(date)")
+        .gte("vouchers.date", fyStartDateStr)
+        .lte("vouchers.date", prevDate)
+        .eq("ledger", ledger);
+        
+      const ents = await fetchAll(() => query);
+      return ents.reduce((acc, e) => acc + (+e.amount || 0), 0);
+    } else {
+      return dal.getLedgerClosing(ledger, prevDate);
+    }
   },
 
   async trialBalance(dto) {
@@ -382,10 +413,14 @@ const dal = {
 
   async columnarTrialBalance(dfrom, dto) {
     const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    const gmap = {};
+    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
+
     const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
     
     const prevDate = subDaysYMD(ymd(dfrom), 1);
     const openCl = await dal.closings(prevDate);
+    
     const ents = await fetchAll(() => sb.from("entries")
       .select("ledger,amount,vouchers!inner(date)")
       .gte("vouchers.date", ymd(dfrom))
@@ -399,8 +434,37 @@ const dal = {
       else ledFlows[e.ledger].creditFlow += Math.abs(amt);
     });
     
+    let priorProfit = 0;
+    
+    // First pass: compute P&L opening values and accumulate prior profit
+    const pnlOpenVals = {};
+    for (const l of leds) {
+      if (isPLLedger(l.name)) continue;
+      const top = l.parent ? topGroup(l.parent, gmap) : "Suspense A/c";
+      const nat = natureOfGroup(top, gmap);
+      
+      if (nat === "income" || nat === "expense") {
+        const openVal = await dal.getLedgerOpeningForPeriod(l.name, dfrom);
+        const allTimeClose = openCl[l.name] ? openCl[l.name].closing : (+l.opening || 0);
+        priorProfit += (allTimeClose - openVal);
+        pnlOpenVals[l.name] = openVal;
+      }
+    }
+    
     const rawLedgers = leds.map(l => {
-      const openVal = openCl[l.name] ? openCl[l.name].closing : (+l.opening || 0);
+      let openVal = 0;
+      if (isPLLedger(l.name)) {
+        openVal = (openCl[l.name] ? openCl[l.name].closing : (+l.opening || 0)) + priorProfit;
+      } else {
+        const top = l.parent ? topGroup(l.parent, gmap) : "Suspense A/c";
+        const nat = natureOfGroup(top, gmap);
+        if (nat === "income" || nat === "expense") {
+          openVal = pnlOpenVals[l.name] || 0;
+        } else {
+          openVal = openCl[l.name] ? openCl[l.name].closing : (+l.opening || 0);
+        }
+      }
+      
       const flows = ledFlows[l.name] || { debitFlow: 0, creditFlow: 0 };
       const closeVal = openVal + (flows.creditFlow - flows.debitFlow);
       
@@ -2154,15 +2218,30 @@ function reportBuilderScreen() {
             const sumsTo = {};
             const sumsPrev = {};
             const flows = {};
+            const pnlSumsPrev = {};
+            const pnlSumsTo = {};
+            
+            const dfromY = parseInt(ymd(dfrom).slice(0, 4));
+            const dfromM = parseInt(ymd(dfrom).slice(4, 6));
+            const fyStartYear = dfromM >= 4 ? dfromY : dfromY - 1;
+            const fyStartDateStr = `${fyStartYear}0401`;
             
             ents.forEach(e => {
               const led = e.ledger;
               const amt = +e.amount || 0;
               const dStr = e.vouchers.date;
               sumsTo[led] = (sumsTo[led] || 0) + amt;
+              
+              if (dStr >= fyStartDateStr) {
+                pnlSumsTo[led] = (pnlSumsTo[led] || 0) + amt;
+              }
               if (dStr <= prevDate) {
                 sumsPrev[led] = (sumsPrev[led] || 0) + amt;
-              } else if (dStr >= ymd(dfrom)) {
+                if (dStr >= fyStartDateStr) {
+                  pnlSumsPrev[led] = (pnlSumsPrev[led] || 0) + amt;
+                }
+              }
+              if (dStr >= ymd(dfrom) && dStr <= ymd(dto)) {
                 if (!flows[led]) flows[led] = { debit: 0, credit: 0 };
                 if (amt < 0) flows[led].debit += Math.abs(amt);
                 else flows[led].credit += amt;
@@ -2170,9 +2249,27 @@ function reportBuilderScreen() {
             });
 
             rows = leds.map(l => {
-              const openVal = (+l.opening || 0) + (sumsPrev[l.name] || 0);
+              const top = l.parent ? topGroup(l.parent, gmap) : "Suspense A/c";
+              const nat = natureOfGroup(top, gmap);
+              const isPL = (nat === "income" || nat === "expense");
+              
+              let openVal = 0;
+              let closeVal = 0;
+              
+              if (isPL) {
+                if (ymd(dfrom) <= fyStartDateStr) {
+                  openVal = 0;
+                } else {
+                  openVal = pnlSumsPrev[l.name] || 0;
+                }
+                closeVal = pnlSumsTo[l.name] || 0;
+              } else {
+                openVal = (+l.opening || 0) + (sumsPrev[l.name] || 0);
+                closeVal = (+l.opening || 0) + (sumsTo[l.name] || 0);
+              }
+              
               const flow = flows[l.name] || { debit: 0, credit: 0 };
-              const closeVal = (+l.opening || 0) + (sumsTo[l.name] || 0);
+              
               return {
                 name: l.name,
                 parent: l.parent || "",
@@ -2535,7 +2632,7 @@ function ledVchScreen(ledger) {
         if (!led) return `<div class="empty">Type a ledger name and press Load.</div>`;
         
         const prevDate = new Date(new Date(S.period.from) - 86400000).toISOString().slice(0, 10);
-        const openingVal = await dal.getLedgerClosing(led, ymd(prevDate));
+        const openingVal = await dal.getLedgerOpeningForPeriod(led, ymd(S.period.from));
         
         const vouchers = await api(`/api/ledger-vouchers?ledger=${encodeURIComponent(led)}&from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`);
         
@@ -3853,7 +3950,9 @@ async function settingsModal() {
        <button class="btn" id="cExport">Export new vouchers</button>
        <button class="btn danger" id="cReset">Clear all data</button>
      </div>
-     <div class="note">Your data is stored in your Supabase project. Access can be secured by setting an APP_PIN in config.js.</div>`,
+     <div class="note" style="color:var(--dr); border:1px solid var(--dr); padding:8px; border-radius:4px; margin-top:14px">
+       <b>Security Warning:</b> The frontend APP_PIN does not secure the database! You MUST enable Row Level Security (RLS) in your Supabase dashboard to prevent unauthorized API access.
+     </div>`,
     `<button class="btn danger" id="cLock">Lock app</button>
      <button class="btn" id="mNo">Close</button>
      <button class="btn gold" id="mYes">Save</button>`,
@@ -4033,9 +4132,11 @@ async function boot() {
   }
   if (S.stack.length === 0) {
     push(gatewayScreen());
-    if (st && (st.vouchers || st.ledgers)) {
-      push(dashboardScreen());
-    }
-  } else render();
+  }
+  if (S.stack.length === 1 && st && (st.vouchers || st.ledgers) && S.stack[0].title === "Gateway of Tally") {
+    push(dashboardScreen());
+  } else {
+    render();
+  }
 }
 boot();

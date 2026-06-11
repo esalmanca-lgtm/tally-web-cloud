@@ -721,6 +721,11 @@ body.light-theme .ac div {
 #modal.hidden {
   display: none;
 }
+@keyframes modal-pop {
+  0% { opacity: 0; transform: scale(0.95) translateY(10px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
 #modalBox {
   background: var(--paper);
   border-radius: var(--radius-lg);
@@ -730,6 +735,7 @@ body.light-theme .ac div {
   box-shadow: var(--shadow-xl);
   overflow: hidden;
   border: 1px solid var(--border-glass);
+  animation: modal-pop 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 #modalBox .mt {
   background: var(--title-bg);
