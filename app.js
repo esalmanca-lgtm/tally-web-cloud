@@ -3008,7 +3008,9 @@ function renderRegisterTable(vouchers, type) {
       const nat = natureOfGroup(top, gmap);
       if (nat === "income" || nat === "expense") return false;
     }
-    return /(gst|tax|cgst|sgst|igst|vat|cess|duty|duties)/i.test(name);
+    const n = name.toLowerCase();
+    if (n.includes("fee") || n.includes("filing") || n.includes("audit") || n.includes("charge") || n.includes("consulting") || n.includes("return")) return false;
+    return /(cgst|sgst|igst|vat|cess|duty|duties|\bgst\b|\btax\b)/i.test(name);
   };
   
   let totalTaxable = 0;
@@ -3093,6 +3095,7 @@ function renderRegisterTable(vouchers, type) {
   });
   
   const acctColName = type === "Sales" ? "Sales Ledger" : "Purchase Ledger";
+  const showGst = totalGst !== 0;
   
   return `
     <table>
@@ -3103,7 +3106,7 @@ function renderRegisterTable(vouchers, type) {
           <th>${type === "Sales" ? "Customer Name" : "Supplier Name"}</th>
           <th>${acctColName}</th>
           <th style="text-align:right">Taxable Value</th>
-          <th style="text-align:right">GST Amount</th>
+          ${showGst ? '<th style="text-align:right">GST Amount</th>' : ''}
           <th style="text-align:right">Gross Value</th>
         </tr>
       </thead>
@@ -3115,14 +3118,14 @@ function renderRegisterTable(vouchers, type) {
             <td>${esc(p.party)}</td>
             <td>${esc(p.acctLedger)}</td>
             <td class="num">${p.taxable ? money(p.taxable) : "0.00"}</td>
-            <td class="num">${p.gst ? money(p.gst) : "0.00"}</td>
+            ${showGst ? `<td class="num">${p.gst ? money(p.gst) : "0.00"}</td>` : ''}
             <td class="num" style="font-weight:600;">${money(p.gross)}</td>
           </tr>
         `).join("")}
         <tr class="total">
           <td colspan="4">Total</td>
           <td class="num">${money(totalTaxable)}</td>
-          <td class="num">${money(totalGst)}</td>
+          ${showGst ? `<td class="num">${money(totalGst)}</td>` : ''}
           <td class="num">${money(totalGross)}</td>
         </tr>
       </tbody>
