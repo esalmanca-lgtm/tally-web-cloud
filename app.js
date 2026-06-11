@@ -3442,6 +3442,7 @@ function coaScreen(presetFilter = "") {
         };
 
         const rows = S.ledgers.filter((l) => {
+          if (presetFilter && (!l.amount || Math.abs(l.amount) < 0.005)) return false;
           if (!q) return true;
           if (l.name.toLowerCase().includes(q)) return true;
           
