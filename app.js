@@ -1078,7 +1078,7 @@ async function getCashFlowData(dfrom, dto) {
       const topL = top.toLowerCase();
       const nat = natureOf(top);
       
-      const amt = nce.amount;
+      const amt = nce.side === "Cr" ? nce.amount : -nce.amount;
       const absAmt = Math.abs(amt);
       
       let cat = "operating";
@@ -1379,11 +1379,17 @@ function columnarLedgerTable(rows, ledgerName, openingVal) {
   rows.forEach((v, i) => {
     const matchingEntries = v.entries.filter(e => e.ledger === ledgerName);
     if (!matchingEntries.length) return;
-    const amt = matchingEntries.reduce((s, e) => s + e.amount, 0);
-    const isDr = amt < 0;
-    const absAmt = Math.abs(amt);
     
-    running += amt;
+    let netAmt = 0;
+    matchingEntries.forEach(e => {
+      if (e.side === "Dr") netAmt -= e.amount;
+      else netAmt += e.amount;
+    });
+    
+    const isDr = netAmt < 0;
+    const absAmt = Math.abs(netAmt);
+    
+    running += netAmt;
     
     const otherLedgers = v.entries.filter(e => e.ledger !== ledgerName).map(e => e.ledger);
     const particularsText = otherLedgers.length ? otherLedgers.join(", ") : "Self";
@@ -1564,24 +1570,40 @@ function renderRegisterTable(vouchers, type) {
     let taxableAmt = 0;
     
     v.entries.forEach(e => {
-      if (e.ledger === v.party) {
+      if (v.party && e.ledger === v.party) {
         partyAmt += e.amount;
-      } else if (isGstLedger(e.ledger)) {
-        gstAmt += e.amount;
+      }
+    });
+    
+    v.entries.forEach(e => {
+      if (v.party && e.ledger === v.party) {
+        return;
+      }
+      
+      const targetSide = type === "Sales" ? "Cr" : "Dr";
+      const isTarget = e.side === targetSide;
+      const amt = isTarget ? e.amount : -e.amount;
+      
+      if (isGstLedger(e.ledger)) {
+        gstAmt += amt;
       } else {
-        taxableAmt += e.amount;
+        taxableAmt += amt;
       }
     });
     
     if (partyAmt === 0) {
+      gstAmt = 0;
+      taxableAmt = 0;
       v.entries.forEach(e => {
-        const targetSide = type === "Sales" ? "Dr" : "Cr";
-        if (e.side === targetSide) {
+        const partySide = type === "Sales" ? "Dr" : "Cr";
+        if (e.side === partySide) {
           partyAmt += e.amount;
-        } else if (isGstLedger(e.ledger)) {
-          gstAmt += e.amount;
         } else {
-          taxableAmt += e.amount;
+          if (isGstLedger(e.ledger)) {
+            gstAmt += e.amount;
+          } else {
+            taxableAmt += e.amount;
+          }
         }
       });
     }
