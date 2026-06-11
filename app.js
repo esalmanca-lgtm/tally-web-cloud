@@ -120,6 +120,24 @@ const dal = {
     return dal.shapeVouchers(rows);
   },
 
+  async salesRegister(dfrom, dto) {
+    const rows = await fetchAll(() => sb.from("vouchers")
+      .select("*, entries(ledger,amount)")
+      .eq("vchtype", "Sales")
+      .gte("date", dfrom || "00000000").lte("date", dto || "99999999")
+      .order("date").order("id"));
+    return dal.shapeVouchers(rows);
+  },
+
+  async purchaseRegister(dfrom, dto) {
+    const rows = await fetchAll(() => sb.from("vouchers")
+      .select("*, entries(ledger,amount)")
+      .eq("vchtype", "Purchase")
+      .gte("date", dfrom || "00000000").lte("date", dto || "99999999")
+      .order("date").order("id"));
+    return dal.shapeVouchers(rows);
+  },
+
   async ledgerVouchers(ledger, dfrom, dto) {
     const ids = await fetchAll(() => sb.from("entries").select("vid").eq("ledger", ledger));
     const vids = [...new Set(ids.map((r) => r.vid))];
@@ -166,14 +184,66 @@ const dal = {
                     credit: Math.round(agg[k][1] * 100) / 100}));
   },
 
+  async columnarTrialBalance(dfrom, dto) {
+    const prevDate = new Date(new Date(dfrom) - 86400000).toISOString().slice(0, 10);
+    const openCl = await dal.closings(ymd(prevDate));
+    const ents = await fetchAll(() => sb.from("entries")
+      .select("ledger,amount,vouchers!inner(date)")
+      .gte("vouchers.date", ymd(dfrom))
+      .lte("vouchers.date", ymd(dto)));
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    const gmap = {};
+    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
+    const groupTotals = {};
+    const initGroup = (g) => {
+      if (!groupTotals[g]) {
+        groupTotals[g] = { openDr: 0, openCr: 0, debitFlow: 0, creditFlow: 0 };
+      }
+    };
+    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+    const ledFlows = {};
+    ents.forEach(e => {
+      if (!ledFlows[e.ledger]) ledFlows[e.ledger] = { debitFlow: 0, creditFlow: 0 };
+      const amt = parseFloat(e.amount || 0);
+      if (amt < 0) ledFlows[e.ledger].debitFlow += Math.abs(amt);
+      else ledFlows[e.ledger].creditFlow += Math.abs(amt);
+    });
+    leds.forEach(l => {
+      const openVal = openCl[l.name] ? openCl[l.name].closing : 0;
+      const flows = ledFlows[l.name] || { debitFlow: 0, creditFlow: 0 };
+      const parentGroup = l.parent || "";
+      const top = parentGroup ? topGroup(parentGroup, gmap) : (l.name.toLowerCase() === "profit & loss a/c" ? "Profit & Loss A/c" : "Suspense A/c");
+      initGroup(top);
+      if (openVal < 0) groupTotals[top].openDr += Math.abs(openVal);
+      else groupTotals[top].openCr += Math.abs(openVal);
+      groupTotals[top].debitFlow += flows.debitFlow;
+      groupTotals[top].creditFlow += flows.creditFlow;
+    });
+    return Object.entries(groupTotals).map(([name, t]) => {
+      const openNet = t.openCr - t.openDr;
+      const flowNet = t.creditFlow - t.debitFlow;
+      const closeNet = openNet + flowNet;
+      return {
+        name,
+        openDr: Math.round(t.openDr * 100) / 100,
+        openCr: Math.round(t.openCr * 100) / 100,
+        debit: Math.round(t.debitFlow * 100) / 100,
+        credit: Math.round(t.creditFlow * 100) / 100,
+        closeDr: closeNet < 0 ? Math.round(Math.abs(closeNet) * 100) / 100 : 0,
+        closeCr: closeNet > 0 ? Math.round(Math.abs(closeNet) * 100) / 100 : 0
+      };
+    }).filter(g => g.openDr || g.openCr || g.debit || g.credit);
+  },
+
   async naturedTotals(dto) {
     const cl = await dal.closings(dto);
     const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
     const gmap = {};
     grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
     const byTop = {};
-    for (const v of Object.values(cl)) {
+    for (const [name, v] of Object.entries(cl)) {
       if (Math.abs(v.closing) < 0.005) continue;
+      if (name.toLowerCase() === "profit & loss a/c") continue;
       const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
       byTop[top] = (byTop[top] || 0) + v.closing;
     }
@@ -181,9 +251,14 @@ const dal = {
   },
 
   async balanceSheet(dto) {
+    const cl = await dal.closings(dto);
     const byTop = await dal.naturedTotals(dto);
     const liab = [], asset = [];
     let pnl = 0;
+    const plLedger = cl["Profit & Loss A/c"];
+    if (plLedger) {
+      pnl += plLedger.closing;
+    }
     for (const top of Object.keys(byTop).sort()) {
       const val = byTop[top], nat = natureOf(top);
       if (nat === "income" || nat === "expense") pnl += val;
@@ -391,6 +466,9 @@ async function api(path, opts) {
     case "/api/daybook": return dal.daybook(q.from, q.to);
     case "/api/ledger-vouchers": return dal.ledgerVouchers(q.ledger, q.from, q.to);
     case "/api/trial-balance": return dal.trialBalance(q.to);
+    case "/api/columnar-trial-balance": return dal.columnarTrialBalance(q.from, q.to);
+    case "/api/sales-register": return dal.salesRegister(q.from, q.to);
+    case "/api/purchase-register": return dal.purchaseRegister(q.from, q.to);
     case "/api/balance-sheet": return dal.balanceSheet(q.to);
     case "/api/pnl": return dal.pnl(q.to);
     case "/api/stock-summary": return [];
@@ -784,10 +862,13 @@ const GW_ITEMS = [
   {label: "Voucher Entry", key: "V", run: () => push(voucherScreen("Payment"))},
   {section: "Display — Reports"},
   {label: "Day Book", key: "D", run: () => push(daybookScreen())},
+  {label: "Columnar Day Book", key: "J", run: () => push(columnarDaybookScreen())},
   {label: "Ledger Vouchers", key: "L", run: () => push(ledVchScreen(""))},
-  {label: "Trial Balance", key: "T", run: () => push(simpleReport("Trial Balance", "/api/trial-balance", trialTable))},
+  {label: "Trial Balance", key: "T", run: () => push(simpleReport("Trial Balance", "/api/columnar-trial-balance", columnarTrialTable))},
   {label: "Balance Sheet", key: "B", run: () => push(simpleReport("Balance Sheet", "/api/balance-sheet", twoColTable))},
   {label: "Profit & Loss A/c", key: "P", run: () => push(simpleReport("Profit & Loss A/c", "/api/pnl", twoColTable))},
+  {label: "Sales Register", key: "R", run: () => push(salesRegisterScreen())},
+  {label: "Purchase Register", key: "U", run: () => push(purchaseRegisterScreen())},
   {label: "Cash Flow Statement", key: "F", run: () => push(cashFlowScreen())},
   {label: "Outstanding Aging", key: "A", run: () => push(agingScreen())},
   {label: "Stock Summary", key: "S", run: () => push(simpleReport("Stock Summary", "/api/stock-summary", stockTable))},
@@ -921,6 +1002,9 @@ function wirePostRender(out) {
   });
   out.querySelectorAll("[data-openledger]").forEach((n) => {
     n.onclick = () => push(ledVchScreen(n.dataset.openledger));
+  });
+  out.querySelectorAll("[data-opengroup]").forEach((n) => {
+    n.onclick = () => push(coaScreen(n.dataset.opengroup));
   });
 }
 
@@ -1265,6 +1349,84 @@ function daybookScreen() {
   return scr;
 }
 
+function columnarLedgerTable(rows, ledgerName, openingVal) {
+  let running = openingVal;
+  const headerHtml = `
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Particulars</th>
+          <th>Vch Type</th>
+          <th>Vch No.</th>
+          <th style="text-align:right">Debit</th>
+          <th style="text-align:right">Credit</th>
+          <th style="text-align:right">Running Balance</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="font-weight:600; background:var(--paper-alt);">
+          <td colspan="4">Opening Balance</td>
+          <td></td>
+          <td></td>
+          <td class="num ${running < 0 ? "dr" : "cr"}">${money(Math.abs(running))} ${running < 0 ? "Dr" : running > 0 ? "Cr" : ""}</td>
+          <td></td>
+        </tr>
+  `;
+  
+  let bodyHtml = "";
+  rows.forEach((v, i) => {
+    const matchingEntries = v.entries.filter(e => e.ledger === ledgerName);
+    if (!matchingEntries.length) return;
+    const amt = matchingEntries.reduce((s, e) => s + e.amount, 0);
+    const isDr = amt < 0;
+    const absAmt = Math.abs(amt);
+    
+    running += amt;
+    
+    const otherLedgers = v.entries.filter(e => e.ledger !== ledgerName).map(e => e.ledger);
+    const particularsText = otherLedgers.length ? otherLedgers.join(", ") : "Self";
+    
+    bodyHtml += `
+      <tr class="row" data-toggle="ent-${i}">
+        <td class="num">${esc(v.date)}</td>
+        <td>
+          <div style="font-weight:600;">${esc(particularsText)}</div>
+          ${v.narration ? `<div style="font-size:11.5px; color:var(--muted); margin-top:2px;">⤷ ${esc(v.narration)}</div>` : ""}
+        </td>
+        <td><span class="pill">${esc(v.type)}</span>${v.isnew ? ` <span class="pill" style="background:#ffe08a;border-color:#e8c25a">NEW</span>` : ""}</td>
+        <td class="num">${esc(v.number)}</td>
+        <td class="num dr">${isDr ? money(absAmt) : ""}</td>
+        <td class="num cr">${!isDr ? money(absAmt) : ""}</td>
+        <td class="num ${running < 0 ? "dr" : "cr"}">${money(Math.abs(running))} ${running < 0 ? "Dr" : running > 0 ? "Cr" : ""}</td>
+        <td>
+          ${v.remoteid ? `<button class="btn danger" style="padding:2px 8px;font-size:11px"
+                data-del='${esc(JSON.stringify({remoteid: v.remoteid, vchkey: v.vchkey, vchtype: v.vchtype, number: v.number}))}'>Del</button>` : ""}
+        </td>
+      </tr>
+      <tr id="ent-${i}" style="display:none"><td colspan="8" class="entries">
+        ${v.entries.map((en) => `<div><span>${esc(en.ledger)}</span>
+          <span class="${en.side === "Dr" ? "dr" : "cr"}">${money(en.amount)} ${en.side}</span></div>`).join("")}
+      </td></tr>
+    `;
+  });
+  
+  const footerHtml = `
+      <tr class="total">
+        <td colspan="4">Closing Balance</td>
+        <td></td>
+        <td></td>
+        <td class="num ${running < 0 ? "dr" : "cr"}">${money(Math.abs(running))} ${running < 0 ? "Dr" : running > 0 ? "Cr" : ""}</td>
+        <td></td>
+      </tr>
+    </tbody>
+    </table>
+  `;
+  
+  return headerHtml + bodyHtml + footerHtml;
+}
+
 function ledVchScreen(ledger) {
   const scr = {
     title: "Ledger Vouchers",
@@ -1284,6 +1446,11 @@ function ledVchScreen(ledger) {
         const led = d.querySelector(".rled").value.trim();
         if (!led) return `<div class="empty">Type a ledger name and press Load.</div>`;
         
+        const prevDate = new Date(new Date(S.period.from) - 86400000).toISOString().slice(0, 10);
+        const openClosings = await dal.closings(ymd(prevDate));
+        const plLedger = openClosings[led];
+        const openingVal = plLedger ? plLedger.closing : 0;
+        
         const vouchers = await api(`/api/ledger-vouchers?ledger=${encodeURIComponent(led)}&from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`);
         
         const paint = () => {
@@ -1298,14 +1465,14 @@ function ledVchScreen(ledger) {
           });
           
           const out = d.querySelector(".rout");
-          out.innerHTML = voucherTable(filtered);
+          out.innerHTML = columnarLedgerTable(filtered, led, openingVal);
           wirePostRender(out);
         };
         
         searchInput.oninput = paint;
         setTimeout(paint, 0);
         
-        return voucherTable(vouchers);
+        return columnarLedgerTable(vouchers, led, openingVal);
       });
       scr.refresh();
     },
@@ -1326,12 +1493,396 @@ function trialTable(rows) {
      <td class="num cr">${money(cr)}</td></tr></table>`;
 }
 
+function columnarTrialTable(rows) {
+  if (!rows.length) return `<div class="empty">Nothing returned.</div>`;
+  let totOpenDr = 0, totOpenCr = 0, totDr = 0, totCr = 0, totCloseDr = 0, totCloseCr = 0;
+  
+  rows.forEach((r) => {
+    totOpenDr += r.openDr;
+    totOpenCr += r.openCr;
+    totDr += r.debit;
+    totCr += r.credit;
+    totCloseDr += r.closeDr;
+    totCloseCr += r.closeCr;
+  });
+  
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">Particulars</th>
+          <th colspan="2" style="text-align:center; border-bottom: 1px solid var(--line);">Opening Balance</th>
+          <th colspan="2" style="text-align:center; border-bottom: 1px solid var(--line);">Transactions</th>
+          <th colspan="2" style="text-align:center; border-bottom: 1px solid var(--line);">Closing Balance</th>
+        </tr>
+        <tr>
+          <th style="text-align:right">Debit</th>
+          <th style="text-align:right">Credit</th>
+          <th style="text-align:right">Debit</th>
+          <th style="text-align:right">Credit</th>
+          <th style="text-align:right">Debit</th>
+          <th style="text-align:right">Credit</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((r) => `
+          <tr class="row" data-opengroup="${esc(r.name)}">
+            <td>${esc(r.name)}</td>
+            <td class="num dr">${r.openDr ? money(r.openDr) : ""}</td>
+            <td class="num cr">${r.openCr ? money(r.openCr) : ""}</td>
+            <td class="num dr">${r.debit ? money(r.debit) : ""}</td>
+            <td class="num cr">${r.credit ? money(r.credit) : ""}</td>
+            <td class="num dr">${r.closeDr ? money(r.closeDr) : ""}</td>
+            <td class="num cr">${r.closeCr ? money(r.closeCr) : ""}</td>
+          </tr>
+        `).join("")}
+        <tr class="total">
+          <td>Total</td>
+          <td class="num dr">${totOpenDr ? money(totOpenDr) : ""}</td>
+          <td class="num cr">${totOpenCr ? money(totOpenCr) : ""}</td>
+          <td class="num dr">${totDr ? money(totDr) : ""}</td>
+          <td class="num cr">${totCr ? money(totCr) : ""}</td>
+          <td class="num dr">${totCloseDr ? money(totCloseDr) : ""}</td>
+          <td class="num cr">${totCloseCr ? money(totCloseCr) : ""}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+}
+
+function renderRegisterTable(vouchers, type) {
+  if (!vouchers.length) return `<div class="empty">No entries in this period.</div>`;
+  const isGstLedger = (name) => /(gst|tax|cgst|sgst|igst|vat)/i.test(name);
+  
+  let totalTaxable = 0;
+  let totalGst = 0;
+  let totalGross = 0;
+  
+  const parsed = vouchers.map((v) => {
+    let partyAmt = 0;
+    let gstAmt = 0;
+    let taxableAmt = 0;
+    
+    v.entries.forEach(e => {
+      if (e.ledger === v.party) {
+        partyAmt += e.amount;
+      } else if (isGstLedger(e.ledger)) {
+        gstAmt += e.amount;
+      } else {
+        taxableAmt += e.amount;
+      }
+    });
+    
+    if (partyAmt === 0) {
+      v.entries.forEach(e => {
+        const targetSide = type === "Sales" ? "Dr" : "Cr";
+        if (e.side === targetSide) {
+          partyAmt += e.amount;
+        } else if (isGstLedger(e.ledger)) {
+          gstAmt += e.amount;
+        } else {
+          taxableAmt += e.amount;
+        }
+      });
+    }
+    
+    const gross = partyAmt || v.amount;
+    totalTaxable += taxableAmt;
+    totalGst += gstAmt;
+    totalGross += gross;
+    
+    return {
+      date: v.date,
+      number: v.number,
+      party: v.party || v.narration || "",
+      taxable: taxableAmt,
+      gst: gstAmt,
+      gross,
+      v
+    };
+  });
+  
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>${type === "Sales" ? "Invoice No." : "Bill No."}</th>
+          <th>${type === "Sales" ? "Customer Name" : "Supplier Name"}</th>
+          <th style="text-align:right">Taxable Value</th>
+          <th style="text-align:right">GST Amount</th>
+          <th style="text-align:right">Gross Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${parsed.map((p, i) => `
+          <tr class="row" data-openledger="${esc(p.party)}">
+            <td class="num">${esc(p.date)}</td>
+            <td class="num">${esc(p.number)}</td>
+            <td>${esc(p.party)}</td>
+            <td class="num">${p.taxable ? money(p.taxable) : "0.00"}</td>
+            <td class="num">${p.gst ? money(p.gst) : "0.00"}</td>
+            <td class="num" style="font-weight:600;">${money(p.gross)}</td>
+          </tr>
+        `).join("")}
+        <tr class="total">
+          <td colspan="3">Total</td>
+          <td class="num">${money(totalTaxable)}</td>
+          <td class="num">${money(totalGst)}</td>
+          <td class="num">${money(totalGross)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+}
+
+function salesRegisterScreen() {
+  const scr = {
+    title: "Sales Register",
+    render(el) {
+      const d = document.createElement("div");
+      d.className = "report";
+      d.innerHTML = reportBar(
+        `<div class="search-box-wrap"><input class="rsearch" placeholder="Search sales…"></div>`
+      );
+      el.appendChild(d);
+      const searchInput = d.querySelector(".rsearch");
+      
+      scr.refresh = () => wireReport(d, async () => {
+        const vouchers = await api(`/api/sales-register?from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`);
+        
+        const paint = () => {
+          const query = searchInput.value.toLowerCase().trim();
+          const filtered = vouchers.filter(v => {
+            if (!query) return true;
+            return (v.party || "").toLowerCase().includes(query) ||
+                   (v.narration || "").toLowerCase().includes(query) ||
+                   (v.number || "").toLowerCase().includes(query) ||
+                   v.entries.some(e => e.ledger.toLowerCase().includes(query));
+          });
+          
+          const out = d.querySelector(".rout");
+          out.innerHTML = renderRegisterTable(filtered, "Sales");
+          wirePostRender(out);
+        };
+        
+        searchInput.oninput = paint;
+        setTimeout(paint, 0);
+        
+        return renderRegisterTable(vouchers, "Sales");
+      });
+      scr.refresh();
+    }
+  };
+  return scr;
+}
+
+function purchaseRegisterScreen() {
+  const scr = {
+    title: "Purchase Register",
+    render(el) {
+      const d = document.createElement("div");
+      d.className = "report";
+      d.innerHTML = reportBar(
+        `<div class="search-box-wrap"><input class="rsearch" placeholder="Search purchases…"></div>`
+      );
+      el.appendChild(d);
+      const searchInput = d.querySelector(".rsearch");
+      
+      scr.refresh = () => wireReport(d, async () => {
+        const vouchers = await api(`/api/purchase-register?from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`);
+        
+        const paint = () => {
+          const query = searchInput.value.toLowerCase().trim();
+          const filtered = vouchers.filter(v => {
+            if (!query) return true;
+            return (v.party || "").toLowerCase().includes(query) ||
+                   (v.narration || "").toLowerCase().includes(query) ||
+                   (v.number || "").toLowerCase().includes(query) ||
+                   v.entries.some(e => e.ledger.toLowerCase().includes(query));
+          });
+          
+          const out = d.querySelector(".rout");
+          out.innerHTML = renderRegisterTable(filtered, "Purchase");
+          wirePostRender(out);
+        };
+        
+        searchInput.oninput = paint;
+        setTimeout(paint, 0);
+        
+        return renderRegisterTable(vouchers, "Purchase");
+      });
+      scr.refresh();
+    }
+  };
+  return scr;
+}
+
+function columnarDaybookScreen() {
+  const scr = {
+    title: "Columnar Day Book",
+    render(el) {
+      const d = document.createElement("div");
+      d.className = "report";
+      d.innerHTML = reportBar(
+        `<div class="search-box-wrap"><input class="rsearch" placeholder="Search vouchers…"></div>`
+      );
+      el.appendChild(d);
+      const searchInput = d.querySelector(".rsearch");
+      
+      scr.refresh = () => wireReport(d, async () => {
+        const vouchers = await api(`/api/daybook?from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`);
+        
+        const paint = () => {
+          const query = searchInput.value.toLowerCase().trim();
+          const filtered = vouchers.filter(v => {
+            if (!query) return true;
+            return (v.party || "").toLowerCase().includes(query) ||
+                   (v.narration || "").toLowerCase().includes(query) ||
+                   (v.type || "").toLowerCase().includes(query) ||
+                   (v.number || "").toLowerCase().includes(query) ||
+                   v.entries.some(e => e.ledger.toLowerCase().includes(query));
+          });
+          
+          const out = d.querySelector(".rout");
+          out.innerHTML = renderColumnarDaybookTable(filtered);
+          wirePostRender(out);
+        };
+        
+        searchInput.oninput = paint;
+        setTimeout(paint, 0);
+        
+        return renderColumnarDaybookTable(vouchers);
+      });
+      scr.refresh();
+    }
+  };
+  return scr;
+}
+
+function renderColumnarDaybookTable(vouchers) {
+  if (!vouchers.length) return `<div class="empty">No vouchers in this period.</div>`;
+  
+  const counts = {};
+  vouchers.forEach(v => {
+    v.entries.forEach(e => {
+      if (e.ledger) {
+        counts[e.ledger] = (counts[e.ledger] || 0) + 1;
+      }
+    });
+  });
+  
+  const topLedgers = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(entry => entry[0]);
+  
+  const colTotals = {};
+  topLedgers.forEach(l => { colTotals[l] = { dr: 0, cr: 0 }; });
+  colTotals["others"] = { dr: 0, cr: 0 };
+  let grandGross = 0;
+  
+  const rowsHtml = vouchers.map((v, idx) => {
+    grandGross += v.amount;
+    
+    const colVals = {};
+    topLedgers.forEach(l => { colVals[l] = 0; });
+    let othersVal = 0;
+    
+    v.entries.forEach(e => {
+      const amt = e.side === "Dr" ? -e.amount : e.amount;
+      if (topLedgers.includes(e.ledger)) {
+        colVals[e.ledger] += amt;
+      } else {
+        othersVal += amt;
+      }
+    });
+    
+    topLedgers.forEach(l => {
+      const val = colVals[l];
+      if (val < 0) colTotals[l].dr += Math.abs(val);
+      else colTotals[l].cr += val;
+    });
+    if (othersVal < 0) colTotals["others"].dr += Math.abs(othersVal);
+    else colTotals["others"].cr += othersVal;
+    
+    const formatCell = (val) => {
+      if (Math.abs(val) < 0.005) return "";
+      const side = val < 0 ? "Dr" : "Cr";
+      return `<span class="${side === "Dr" ? "dr" : "cr"}">${money(Math.abs(val))} ${side}</span>`;
+    };
+    
+    return `
+      <tr class="row" data-toggle="colent-${idx}">
+        <td class="num">${esc(v.date)}</td>
+        <td><span class="pill">${esc(v.type)}</span></td>
+        <td class="num">${esc(v.number)}</td>
+        <td>${esc(v.party || v.narration || "")}</td>
+        <td class="num" style="font-weight:600;">${money(v.amount)}</td>
+        ${topLedgers.map(l => `<td class="num">${formatCell(colVals[l])}</td>`).join("")}
+        <td class="num">${formatCell(othersVal)}</td>
+      </tr>
+      <tr id="colent-${idx}" style="display:none"><td colspan="${6 + topLedgers.length}" class="entries">
+        ${v.entries.map((en) => `<div><span>${esc(en.ledger)}</span>
+          <span class="${en.side === "Dr" ? "dr" : "cr"}">${money(en.amount)} ${en.side}</span></div>`).join("")}
+        ${v.narration ? `<div style="margin-top:6px;justify-content:flex-start">⤷ ${esc(v.narration)}</div>` : ""}
+      </td></tr>
+    `;
+  }).join("");
+  
+  const formatTotalCell = (tot) => {
+    const net = tot.cr - tot.dr;
+    if (Math.abs(net) < 0.005) return "";
+    const side = net < 0 ? "Dr" : "Cr";
+    return `<span class="${side === "Dr" ? "dr" : "cr"}">${money(Math.abs(net))} ${side}</span>`;
+  };
+  
+  return `
+    <table style="font-size:11px;">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>No.</th>
+          <th>Particulars</th>
+          <th style="text-align:right">Gross</th>
+          ${topLedgers.map(l => `<th style="text-align:right; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(l)}">${esc(l)}</th>`).join("")}
+          <th style="text-align:right">Others</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml}
+        <tr class="total">
+          <td colspan="4">Total</td>
+          <td class="num">${money(grandGross)}</td>
+          ${topLedgers.map(l => `<td class="num">${formatTotalCell(colTotals[l])}</td>`).join("")}
+          <td class="num">${formatTotalCell(colTotals["others"])}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+}
+
 function twoColTable(rows) {
   if (!rows.length) return `<div class="empty">Nothing returned.</div>`;
   return `<table><tr><th>Particulars</th><th style="text-align:right">Amount</th></tr>` +
-    rows.map((r) => `<tr><td>${esc(r.name)}</td>
-      <td class="num ${r.side === "Dr" ? "dr" : "cr"}">${r.amount ? money(r.amount) + " " + r.side : ""}</td>
-    </tr>`).join("") + `</table>`;
+    rows.map((r) => {
+      const isHeader = r.name.startsWith("—") && r.name.endsWith("—");
+      if (isHeader) {
+        return `<tr style="font-weight:600; background:var(--paper-alt);"><td colspan="2">${esc(r.name)}</td></tr>`;
+      }
+      const isPnlLedger = r.name.toLowerCase() === "profit & loss a/c";
+      const isNetProfitLoss = r.name.toLowerCase() === "net profit" || r.name.toLowerCase() === "net loss";
+      let clickAttr = "";
+      if (isPnlLedger) {
+        clickAttr = `data-openledger="${esc(r.name)}"`;
+      } else if (!isNetProfitLoss) {
+        clickAttr = `data-opengroup="${esc(r.name)}"`;
+      }
+      return `<tr class="row" ${clickAttr}><td>${esc(r.name)}</td>
+        <td class="num ${r.side === "Dr" ? "dr" : "cr"}">${r.amount ? money(r.amount) + " " + r.side : ""}</td>
+      </tr>`;
+    }).join("") + `</table>`;
 }
 
 function stockTable(rows) {
@@ -1360,14 +1911,14 @@ function simpleReport(title, url, tableFn) {
 }
 
 /* ---------------------------------------------------- chart of accounts --- */
-function coaScreen() {
+function coaScreen(presetFilter = "") {
   const scr = {
     title: "Chart of Accounts — Ledgers",
     render(el) {
       const d = document.createElement("div");
       d.className = "report";
       d.innerHTML = `<div class="rbar">
-          <div class="search-box-wrap" style="flex:none; width:280px;"><input class="f" placeholder="Filter ledgers…"></div>
+          <div class="search-box-wrap" style="flex:none; width:280px;"><input class="f" placeholder="Filter ledgers…" value="${esc(presetFilter)}"></div>
           <button class="btn reload">Refresh</button>
           <button class="btn gold newled">+ New Ledger (Alt+C)</button>
           <span class="bal-hint cnt"></span></div>
