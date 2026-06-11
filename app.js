@@ -162,13 +162,54 @@ const dal = {
     };
   },
 
-  async ledgers(dto) {
-    const cl = await dal.closings(dto);
-    return Object.entries(cl).map(([name, v]) => ({
-      name,
-      parent: v.parent || "",
-      ...fdc(v.closing)
-    })).sort((a, b) => a.name.localeCompare(b.name));
+  async ledgers(dfrom, dto) {
+    if (!dfrom) {
+      const cl = await dal.closings(dto);
+      return Object.entries(cl).map(([name, v]) => ({
+        name,
+        parent: v.parent || "",
+        ...fdc(v.closing)
+      })).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    const gmap = await getGroupNatureMap();
+    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+    const clTo = await dal.closings(dto);
+    
+    const fromY = parseInt(ymd(dfrom).slice(0, 4));
+    const fromM = parseInt(ymd(dfrom).slice(4, 6));
+    const fyStartYear = fromM >= 4 ? fromY : fromY - 1;
+    const fyStartDateStr = `${fyStartYear}0401`;
+    const includeOpening = ymd(dfrom) <= fyStartDateStr;
+
+    const ents = await fetchAll(() => sb.from("entries")
+      .select("ledger,amount,vouchers!inner(date)")
+      .gte("vouchers.date", ymd(dfrom))
+      .lte("vouchers.date", ymd(dto)));
+      
+    const periodSums = {};
+    ents.forEach(e => { periodSums[e.ledger] = (periodSums[e.ledger] || 0) + (+e.amount || 0); });
+    
+    return leds.map(l => {
+      const top = l.parent ? topGroup(l.parent, gmap) : "Suspense A/c";
+      const nat = natureOfGroup(top, gmap);
+      
+      let balance = 0;
+      if (nat === "income" || nat === "expense") {
+        balance = periodSums[l.name] || 0;
+        if (includeOpening) {
+          balance += (+l.opening || 0);
+        }
+      } else {
+        balance = clTo[l.name] ? clTo[l.name].closing : 0;
+      }
+      
+      return {
+        name: l.name,
+        parent: l.parent || "",
+        ...fdc(balance)
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
   },
 
   async groups() {
@@ -977,7 +1018,7 @@ async function api(path, opts) {
     case "/api/data-status": return {mode: "cloud",
       company: localStorage.getItem("tw_company") || "", ...(await dal.status())};
     case "/api/companies": return [{name: localStorage.getItem("tw_company") || "", from: ""}];
-    case "/api/ledgers": return dal.ledgers(q.to);
+    case "/api/ledgers": return dal.ledgers(q.from, q.to);
     case "/api/groups": return dal.groups();
     case "/api/daybook": return dal.daybook(q.from, q.to);
     case "/api/ledger-vouchers": return dal.ledgerVouchers(q.ledger, q.from, q.to);
@@ -3883,8 +3924,9 @@ document.querySelectorAll("#btnbar button").forEach((b) => {
 /* ----------------------------------------------------------------- boot --- */
 async function loadMasters(flash) {
   try {
+    const fromDate = S.period.from ? ymd(S.period.from) : "";
     const toDate = S.period.to ? ymd(S.period.to) : "";
-    const ledUrl = toDate ? `/api/ledgers?to=${toDate}` : "/api/ledgers";
+    const ledUrl = (fromDate || toDate) ? `/api/ledgers?from=${fromDate}&to=${toDate}` : "/api/ledgers";
     const [led, grp] = await Promise.all([api(ledUrl), api("/api/groups")]);
     S.ledgers = led; S.groups = grp;
     S.groupNatures = {};
