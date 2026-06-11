@@ -2008,23 +2008,25 @@ function reportBuilderScreen() {
       d.innerHTML = `
         <div class="rb-layout">
           <div class="rb-sidebar">
-            <div class="rb-card">
-              <h3>1. Data Source</h3>
-              <select class="rb-source" style="width: 100%">
-                <option value="ledgers">Ledger Balances</option>
-                <option value="groups">Group Summary</option>
-                <option value="vouchers">Vouchers (Daybook)</option>
-              </select>
+            <div class="rb-card" id="rbCardSource">
+              <div class="rb-card-header"><h3>1. Data Source</h3><span class="toggle-icon">▼</span></div>
+              <div class="rb-card-body">
+                <select class="rb-source" style="width: 100%">
+                  <option value="ledgers">Ledger Balances</option>
+                  <option value="groups">Group Summary</option>
+                  <option value="vouchers">Vouchers (Daybook)</option>
+                </select>
+              </div>
             </div>
             
-            <div class="rb-card">
-              <h3>2. Select Columns</h3>
-              <div class="rb-columns"></div>
+            <div class="rb-card" id="rbCardCols">
+              <div class="rb-card-header"><h3>2. Select Columns</h3><span class="toggle-icon">▼</span></div>
+              <div class="rb-card-body rb-columns"></div>
             </div>
             
-            <div class="rb-card">
-              <h3>3. Filters</h3>
-              <div class="rb-filters">
+            <div class="rb-card" id="rbCardFilters">
+              <div class="rb-card-header"><h3>3. Filters & Grouping</h3><span class="toggle-icon">▼</span></div>
+              <div class="rb-card-body rb-filters">
                 <div class="filter-row">
                   <label>Date From</label>
                   <input type="date" class="rb-from" value="${S.period.from}">
@@ -2037,16 +2039,27 @@ function reportBuilderScreen() {
                   <label>Parent Group</label>
                   <select class="rb-group-filter" style="width:100%"><option value="">All Groups</option></select>
                 </div>
+                <div class="filter-row rb-vchtype-filter-wrap" style="display:none">
+                  <label>Voucher Types</label>
+                  <div class="rb-vchtypes" style="max-height:100px;overflow-y:auto;border:1px solid var(--line);border-radius:4px;padding:4px">
+                    <label><input type="checkbox" value="Sales"> Sales</label>
+                    <label><input type="checkbox" value="Purchase"> Purchase</label>
+                    <label><input type="checkbox" value="Receipt"> Receipt</label>
+                    <label><input type="checkbox" value="Payment"> Payment</label>
+                    <label><input type="checkbox" value="Contra"> Contra</label>
+                    <label><input type="checkbox" value="Journal"> Journal</label>
+                  </div>
+                </div>
                 <div class="filter-row">
                   <label>Text Filter</label>
                   <input class="rb-text-filter" placeholder="Search name/particulars…" style="width:100%">
                 </div>
                 <div class="filter-row rb-bal-filter-wrap">
-                  <label>Min Balance</label>
+                  <label>Min Amount/Bal</label>
                   <input type="number" class="rb-min-bal" placeholder="0" style="width:100%">
                 </div>
                 <div class="filter-row rb-bal-filter-wrap">
-                  <label>Max Balance</label>
+                  <label>Max Amount/Bal</label>
                   <input type="number" class="rb-max-bal" placeholder="Infinity" style="width:100%">
                 </div>
                 <div class="filter-row rb-bal-type-wrap">
@@ -2058,19 +2071,30 @@ function reportBuilderScreen() {
                     <option value="cr">Credit Only (Cr)</option>
                   </select>
                 </div>
+                <div class="filter-row rb-groupby-wrap" style="display:none; margin-top:8px">
+                  <label style="color:var(--gold);font-weight:700">Group By (Pivot)</label>
+                  <select class="rb-groupby" style="width:100%">
+                    <option value="">None (List All)</option>
+                    <option value="date">Date</option>
+                    <option value="vchtype">Voucher Type</option>
+                    <option value="party">Party Ledger</option>
+                  </select>
+                </div>
               </div>
             </div>
             
-            <div class="rb-card">
-              <button class="btn gold rb-btn-run" style="width:100%">Run Report</button>
+            <div class="rb-card" style="padding:0; border:none; background:transparent">
+              <button class="btn gold rb-btn-run" style="width:100%; height:40px; font-size:14px">RUN REPORT</button>
             </div>
             
-            <div class="rb-card">
-              <h3>Saved Reports</h3>
-              <div class="rb-saved-list"></div>
-              <div style="display:flex; gap:6px; margin-top:8px;">
-                <input class="rb-save-name" placeholder="Report name…" style="flex:1; min-width:0;">
-                <button class="btn rb-btn-save">Save</button>
+            <div class="rb-card collapsed" id="rbCardSaved">
+              <div class="rb-card-header"><h3>Saved Reports</h3><span class="toggle-icon">◀</span></div>
+              <div class="rb-card-body">
+                <div class="rb-saved-list"></div>
+                <div style="display:flex; gap:6px; margin-top:8px;">
+                  <input class="rb-save-name" placeholder="Report name…" style="flex:1; min-width:0;">
+                  <button class="btn rb-btn-save">Save</button>
+                </div>
               </div>
             </div>
           </div>
@@ -2081,6 +2105,7 @@ function reportBuilderScreen() {
               <button class="btn outline csv-btn" style="margin-left: auto;">CSV</button>
               <button class="btn outline print-btn">Print</button>
             </div>
+            <div class="rb-dash-wrap" style="display:none"></div>
             <div class="rb-table-wrap">
               <div class="empty">Configure columns and click Run Report.</div>
             </div>
@@ -2088,6 +2113,14 @@ function reportBuilderScreen() {
         </div>
       `;
       el.appendChild(d);
+
+      d.querySelectorAll(".rb-card-header").forEach(h => {
+        h.onclick = () => {
+          h.parentElement.classList.toggle("collapsed");
+          const icon = h.querySelector(".toggle-icon");
+          if (icon) icon.textContent = h.parentElement.classList.contains("collapsed") ? "◀" : "▼";
+        };
+      });
 
       const sourceSelect = d.querySelector(".rb-source");
       const colsDiv = d.querySelector(".rb-columns");
@@ -2114,9 +2147,9 @@ function reportBuilderScreen() {
           return `<label><input type="checkbox" data-col="${c.key}" ${checked ? "checked" : ""}> ${esc(c.label)}</label>`;
         }).join("");
         
-        // Hide balance options if source is vouchers
         const isVch = src === "vouchers";
-        d.querySelectorAll(".rb-bal-filter-wrap, .rb-bal-type-wrap").forEach(n => n.style.display = isVch ? "none" : "");
+        d.querySelectorAll(".rb-bal-type-wrap, .rb-group-filter-wrap").forEach(n => n.style.display = isVch ? "none" : "");
+        d.querySelectorAll(".rb-vchtype-filter-wrap, .rb-groupby-wrap").forEach(n => n.style.display = isVch ? "" : "none");
       };
       sourceSelect.onchange = () => updateColumns();
       updateColumns();
@@ -2145,6 +2178,11 @@ function reportBuilderScreen() {
             d.querySelector(".rb-min-bal").value = r.minBal || "";
             d.querySelector(".rb-max-bal").value = r.maxBal || "";
             d.querySelector(".rb-bal-type").value = r.balType || "all";
+            d.querySelector(".rb-groupby").value = r.groupBy || "";
+            
+            d.querySelectorAll(".rb-vchtypes input").forEach(cb => {
+              cb.checked = (r.vchTypes || []).includes(cb.value);
+            });
             runReport();
           };
         });
@@ -2168,6 +2206,7 @@ function reportBuilderScreen() {
         const name = saveNameInput.value.trim();
         if (!name) return alert("Please enter a report name.");
         const checkedCols = Array.from(colsDiv.querySelectorAll("input:checked")).map(n => n.dataset.col);
+        const vchTypes = Array.from(d.querySelectorAll(".rb-vchtypes input:checked")).map(n => n.value);
         
         let saved = [];
         try { saved = JSON.parse(localStorage.getItem("tw_saved_reports") || "[]"); } catch (e) {}
@@ -2181,7 +2220,9 @@ function reportBuilderScreen() {
           textFilter: d.querySelector(".rb-text-filter").value,
           minBal: d.querySelector(".rb-min-bal").value,
           maxBal: d.querySelector(".rb-max-bal").value,
-          balType: d.querySelector(".rb-bal-type").value
+          balType: d.querySelector(".rb-bal-type").value,
+          groupBy: d.querySelector(".rb-groupby").value,
+          vchTypes: vchTypes
         });
         localStorage.setItem("tw_saved_reports", JSON.stringify(saved));
         saveNameInput.value = "";
@@ -2190,6 +2231,7 @@ function reportBuilderScreen() {
 
       const runReport = async () => {
         tableWrap.innerHTML = `<div class="empty">Generating report…</div>`;
+        d.querySelector(".rb-dash-wrap").style.display = "none";
         try {
           const src = sourceSelect.value;
           const dfrom = d.querySelector(".rb-from").value;
@@ -2199,6 +2241,8 @@ function reportBuilderScreen() {
           const minB = d.querySelector(".rb-min-bal").value ? parseFloat(d.querySelector(".rb-min-bal").value) : null;
           const maxB = d.querySelector(".rb-max-bal").value ? parseFloat(d.querySelector(".rb-max-bal").value) : null;
           const balType = d.querySelector(".rb-bal-type").value;
+          const vchTypes = Array.from(d.querySelectorAll(".rb-vchtypes input:checked")).map(n => n.value);
+          const groupBy = d.querySelector(".rb-groupby").value;
 
           const gmap = await getGroupNatureMap();
           
@@ -2405,7 +2449,7 @@ function reportBuilderScreen() {
           } 
           else if (src === "vouchers") {
             const vchs = await fetchAll(() => sb.from("vouchers")
-              .select("*, entries(ledger,amount)")
+              .select("id, date, vchtype, number, party, narration, entries(ledger,amount)")
               .gte("date", ymd(dfrom))
               .lte("date", ymd(dto))
               .order("date").order("id"));
@@ -2416,70 +2460,168 @@ function reportBuilderScreen() {
                 if (+e.amount < 0) totalDr += -e.amount;
               });
               return {
+                id: v.id,
                 date: v.date,
-                vchtype: v.vchtype,
-                number: v.number,
-                party: v.party,
+                vchtype: v.vchtype || "",
+                number: v.number || "",
+                party: v.party || "",
                 amount: totalDr,
-                narration: v.narration,
+                narration: v.narration || "",
                 ledgerList: v.entries.map(e => `${e.ledger} (${e.amount < 0 ? money(-e.amount) + ' Dr' : money(e.amount) + ' Cr'})`).join(", ")
               };
             });
 
-            // Filters
+            if (vchTypes.length) {
+              rows = rows.filter(r => vchTypes.includes(r.vchtype));
+            }
+            if (minB !== null) rows = rows.filter(r => r.amount >= minB);
+            if (maxB !== null) rows = rows.filter(r => r.amount <= maxB);
+
             if (tf) {
               rows = rows.filter(r => r.party.toLowerCase().includes(tf) || 
                                       r.narration.toLowerCase().includes(tf) ||
                                       r.vchtype.toLowerCase().includes(tf) ||
                                       r.ledgerList.toLowerCase().includes(tf));
             }
+            
+            if (groupBy) {
+              const pivot = {};
+              rows.forEach(r => {
+                const k = r[groupBy] || "None";
+                if (!pivot[k]) pivot[k] = { id: "", date: k, vchtype: k, party: k, number: "Summed", narration: "", amount: 0, ledgerList: "" };
+                pivot[k].amount += r.amount;
+              });
+              rows = Object.values(pivot);
+            }
           }
 
-          // Render preview table
-          const checkedCols = Array.from(colsDiv.querySelectorAll("input:checked")).map(n => n.dataset.col);
-          const colsDef = COL_MAP[src].filter(c => checkedCols.includes(c.key));
-
-          if (!rows.length) {
-            tableWrap.innerHTML = `<div class="empty">No records found matching filters.</div>`;
-            return;
-          }
-
-          let html = `<table><thead><tr>`;
-          colsDef.forEach(c => {
-            const isRight = c.format && c.format.startsWith("money");
-            html += `<th style="${isRight ? 'text-align:right' : ''}">${esc(c.label)}</th>`;
-          });
-          html += `</tr></thead><tbody>`;
-
-          rows.forEach(r => {
-            html += `<tr>`;
-            colsDef.forEach(c => {
-              const val = r[c.key];
-              const isRight = c.format && c.format.startsWith("money");
-              let text = "";
-              let cls = "";
-              if (c.format === "money_bal") {
-                const bObj = fdc(val);
-                text = bObj.amount ? money(bObj.amount) + " " + bObj.side : "—";
-                cls = bObj.side === "Dr" ? "dr" : (bObj.side === "Cr" ? "cr" : "");
-              } else if (c.format === "money") {
-                text = val ? money(val) : "—";
-              } else if (c.format === "date") {
-                text = tdate(val.slice(0,4) + "-" + val.slice(4,6) + "-" + val.slice(6,8));
-              } else {
-                text = val != null ? esc(val) : "";
-              }
-              html += `<td class="${isRight ? 'num' : ''} ${cls}" style="${isRight ? 'text-align:right;' : ''}">${text}</td>`;
-            });
-            html += `</tr>`;
-          });
-
-          html += `</tbody></table>`;
-          tableWrap.innerHTML = html;
-          wirePostRender(tableWrap);
-        } catch (e) {
-          tableWrap.innerHTML = `<div class="errbox">${esc(e.message)}</div>`;
+          d._rbRows = rows;
+          d._rbSortCol = null;
+          d._rbSortDir = "asc";
+          renderPreviewTable();
+        } catch (err) {
+          console.error(err);
+          tableWrap.innerHTML = `<div class="empty" style="color:red">Error: ${esc(err.message)}</div>`;
         }
+      };
+
+      const renderPreviewTable = () => {
+        let rows = [...d._rbRows];
+        const src = sourceSelect.value;
+        const checkedCols = Array.from(colsDiv.querySelectorAll("input:checked")).map(n => n.dataset.col);
+        const colsDef = COL_MAP[src].filter(c => checkedCols.includes(c.key));
+
+        if (!rows.length) {
+          tableWrap.innerHTML = `<div class="empty">No records found matching filters.</div>`;
+          return;
+        }
+
+        if (d._rbSortCol) {
+          const sc = d._rbSortCol;
+          const sd = d._rbSortDir === "asc" ? 1 : -1;
+          rows.sort((a,b) => {
+            let va = a[sc], vb = b[sc];
+            if (typeof va === "string") return va.localeCompare(vb) * sd;
+            if (va < vb) return -1 * sd;
+            if (va > vb) return 1 * sd;
+            return 0;
+          });
+        }
+
+        let totalDr = 0, totalCr = 0, netFlow = 0;
+        if (src === "vouchers") {
+           totalDr = rows.reduce((s,r) => s + (r.amount||0), 0);
+           totalCr = totalDr;
+        } else {
+           totalDr = rows.reduce((s,r) => s + (r.debitFlow||0), 0);
+           totalCr = rows.reduce((s,r) => s + (r.creditFlow||0), 0);
+           netFlow = rows.reduce((s,r) => s + ((r.closing||0) - (r.opening||0)), 0);
+        }
+        const totalVal = totalDr + totalCr;
+        const drPct = totalVal ? (totalDr / totalVal) * 100 : 50;
+        const crPct = totalVal ? (totalCr / totalVal) * 100 : 50;
+
+        const dash = d.querySelector(".rb-dash-wrap");
+        dash.style.display = "block";
+        dash.innerHTML = `
+          <div class="rb-dashboard">
+            <div class="rb-dash-item">
+              <span class="rb-dash-label">Total Debit</span>
+              <span class="rb-dash-value rb-dash-dr">₹ ${money(totalDr)}</span>
+            </div>
+            <div class="rb-dash-item">
+              <span class="rb-dash-label">Total Credit</span>
+              <span class="rb-dash-value rb-dash-cr">₹ ${money(totalCr)}</span>
+            </div>
+            ${src !== "vouchers" ? `
+            <div class="rb-dash-item">
+              <span class="rb-dash-label">Net Flow</span>
+              <span class="rb-dash-value ${netFlow < 0 ? 'rb-dash-dr' : 'rb-dash-cr'}">
+                ${money(Math.abs(netFlow))} ${netFlow < 0 ? 'Dr' : (netFlow > 0 ? 'Cr' : '')}
+              </span>
+            </div>
+            ` : ''}
+          </div>
+          <div class="rb-visual-bar" style="margin-bottom: 16px;">
+            <div class="dr-bar" style="width: ${drPct}%"></div>
+            <div class="cr-bar" style="width: ${crPct}%"></div>
+          </div>
+        `;
+
+        let html = `<table><thead><tr>`;
+        colsDef.forEach(c => {
+          const isRight = c.format && c.format.startsWith("money");
+          const sc = d._rbSortCol;
+          const dir = d._rbSortDir;
+          const arrow = sc === c.key ? (dir === "asc" ? " <span style='color:var(--gold)'>↑</span>" : " <span style='color:var(--gold)'>↓</span>") : "";
+          html += `<th data-sortcol="${c.key}" style="cursor:pointer; user-select:none; ${isRight ? 'text-align:right' : ''}">${esc(c.label)}${arrow}</th>`;
+        });
+        html += `</tr></thead><tbody>`;
+
+        rows.forEach(r => {
+          let dataAttr = "";
+          if (src === "vouchers" && r.id) dataAttr = `data-vchid="${r.id}" class="clickable"`;
+          else if (src === "ledgers" && r.name) dataAttr = `data-openledger="${esc(r.name)}" class="clickable"`;
+          
+          html += `<tr ${dataAttr}>`;
+          colsDef.forEach(c => {
+            const val = r[c.key];
+            const isRight = c.format && c.format.startsWith("money");
+            let text = "";
+            let cls = "";
+            if (c.format === "money_bal") {
+              const bObj = fdc(val);
+              text = bObj.amount ? money(bObj.amount) + " " + bObj.side : "—";
+              cls = bObj.side === "Dr" ? "dr" : (bObj.side === "Cr" ? "cr" : "");
+            } else if (c.format === "money") {
+              text = val ? money(val) : "—";
+            } else if (c.format === "date") {
+              text = val ? tdate(val.slice(0,4) + "-" + val.slice(4,6) + "-" + val.slice(6,8)) : "—";
+            } else {
+              text = val != null ? esc(val) : "";
+            }
+            html += `<td class="${isRight ? 'num' : ''} ${cls}" style="${isRight ? 'text-align:right;' : ''}">${text}</td>`;
+          });
+          html += `</tr>`;
+        });
+
+        html += `</tbody></table>`;
+        tableWrap.innerHTML = html;
+        wirePostRender(tableWrap);
+
+        // Wire sorting clicks
+        tableWrap.querySelectorAll("th[data-sortcol]").forEach(th => {
+          th.onclick = () => {
+            const col = th.dataset.sortcol;
+            if (d._rbSortCol === col) {
+              d._rbSortDir = d._rbSortDir === "asc" ? "desc" : "asc";
+            } else {
+              d._rbSortCol = col;
+              d._rbSortDir = "asc";
+            }
+            renderPreviewTable();
+          };
+        });
       };
 
       d.querySelector(".rb-btn-run").onclick = runReport;

@@ -961,10 +961,58 @@ textarea.xml {
   font-weight: 700;
   text-transform: uppercase;
   color: var(--muted);
-  margin-bottom: 8px;
-  border-bottom: 1px solid var(--line);
-  padding-bottom: 4px;
+  margin-bottom: 0;
 }
+.rb-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+.rb-card-body { display: block; }
+.rb-card.collapsed .rb-card-body { display: none; }
+.rb-card-header .toggle-icon { font-size: 10px; color: var(--muted); }
+
+.rb-dashboard {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--paper-alt);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-glass);
+}
+.rb-dash-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.rb-dash-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+.rb-dash-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-family: var(--font-num);
+}
+.rb-dash-dr { color: var(--dr); }
+.rb-dash-cr { color: var(--cr); }
+.rb-visual-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 8px;
+  background: var(--line);
+}
+.rb-visual-bar .dr-bar { background: var(--dr); }
+.rb-visual-bar .cr-bar { background: var(--cr); }
 .rb-columns {
   display: flex;
   flex-direction: column;
