@@ -3027,6 +3027,7 @@ function renderRegisterTable(vouchers, type) {
       }
     });
     
+    let nonPartyGST = [];
     v.entries.forEach(e => {
       if (v.party && e.ledger === v.party) {
         return;
@@ -3038,6 +3039,7 @@ function renderRegisterTable(vouchers, type) {
       
       if (isGstLedger(e.ledger)) {
         gstAmt += amt;
+        nonPartyGST.push({ ledger: e.ledger, amt });
       } else {
         taxableAmt += amt;
         if (!acctLedgers.includes(e.ledger)) acctLedgers.push(e.ledger);
@@ -3048,6 +3050,7 @@ function renderRegisterTable(vouchers, type) {
       gstAmt = 0;
       taxableAmt = 0;
       acctLedgers = [];
+      nonPartyGST = [];
       v.entries.forEach(e => {
         const partySide = type === "Sales" ? "Dr" : "Cr";
         if (e.side === partySide) {
@@ -3055,12 +3058,21 @@ function renderRegisterTable(vouchers, type) {
         } else {
           if (isGstLedger(e.ledger)) {
             gstAmt += e.amount;
+            nonPartyGST.push({ ledger: e.ledger, amt: e.amount });
           } else {
             taxableAmt += e.amount;
             if (!acctLedgers.includes(e.ledger)) acctLedgers.push(e.ledger);
           }
         }
       });
+    }
+
+    if (acctLedgers.length === 0 && nonPartyGST.length > 0) {
+      nonPartyGST.sort((a, b) => Math.abs(b.amt) - Math.abs(a.amt));
+      const biggest = nonPartyGST[0];
+      gstAmt -= biggest.amt;
+      taxableAmt += biggest.amt;
+      acctLedgers.push(biggest.ledger);
     }
     
     const gross = partyAmt || v.amount;
