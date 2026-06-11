@@ -2065,6 +2065,20 @@ function reportBuilderScreen() {
 
           const gmap = await getGroupNatureMap();
           
+          const isDescendant = (groupName, targetGroupName) => {
+            if (!groupName || !targetGroupName) return false;
+            let curr = groupName.toLowerCase();
+            const tgt = targetGroupName.toLowerCase();
+            let dLimit = 0;
+            while (curr && dLimit < 30) {
+              if (curr === tgt) return true;
+              const parentGroup = gmap[curr] ? gmap[curr].parent : "";
+              curr = parentGroup ? parentGroup.toLowerCase() : "";
+              dLimit++;
+            }
+            return false;
+          };
+
           let rows = [];
           if (src === "ledgers") {
             const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
@@ -2108,7 +2122,7 @@ function reportBuilderScreen() {
 
             // Filters
             if (gf) {
-              rows = rows.filter(r => r.parent && (r.parent === gf || topGroup(r.parent, gmap) === gf));
+              rows = rows.filter(r => r.parent && (r.parent === gf || isDescendant(r.parent, gf)));
             }
             if (tf) {
               rows = rows.filter(r => r.name.toLowerCase().includes(tf) || r.parent.toLowerCase().includes(tf));
@@ -2200,7 +2214,7 @@ function reportBuilderScreen() {
 
             // Filters
             if (gf) {
-              rows = rows.filter(r => r.name === gf || r.parent === gf || topGroup(r.name, gmap) === gf);
+              rows = rows.filter(r => r.name === gf || isDescendant(r.name, gf));
             }
             if (tf) {
               rows = rows.filter(r => r.name.toLowerCase().includes(tf) || r.parent.toLowerCase().includes(tf));
@@ -3348,9 +3362,35 @@ function coaScreen(presetFilter = "") {
         <div class="rout"></div>`;
       el.appendChild(d);
       const paint = () => {
-        const q = d.querySelector(".f").value.toLowerCase();
-        const rows = S.ledgers.filter((l) => !q || l.name.toLowerCase().includes(q)
-          || (l.parent || "").toLowerCase().includes(q));
+        const q = d.querySelector(".f").value.toLowerCase().trim();
+        
+        const gmap = {};
+        S.groups.forEach(g => {
+          gmap[g.name.toLowerCase()] = { parent: g.parent || "" };
+        });
+
+        const isDescendant = (groupName, targetGroupName) => {
+          if (!groupName || !targetGroupName) return false;
+          let curr = groupName.toLowerCase();
+          const tgt = targetGroupName.toLowerCase();
+          let dLimit = 0;
+          while (curr && dLimit < 30) {
+            if (curr === tgt) return true;
+            const parentGroup = gmap[curr] ? gmap[curr].parent : "";
+            curr = parentGroup ? parentGroup.toLowerCase() : "";
+            dLimit++;
+          }
+          return false;
+        };
+
+        const rows = S.ledgers.filter((l) => {
+          if (!q) return true;
+          if (l.name.toLowerCase().includes(q)) return true;
+          if ((l.parent || "").toLowerCase().includes(q)) return true;
+          if (l.parent && isDescendant(l.parent, q)) return true;
+          return false;
+        });
+
         d.querySelector(".cnt").textContent = `${rows.length} / ${S.ledgers.length}`;
         d.querySelector(".rout").innerHTML = rows.length
           ? `<table><tr><th>Ledger</th><th>Under</th><th style="text-align:right">Closing Balance</th></tr>` +
@@ -3771,8 +3811,9 @@ function periodModal() {
     `<button class="btn" id="mNo">Cancel</button><button class="btn gold" id="mYes">Set</button>`,
     () => {
       $("mNo").onclick = closeModal;
-      $("mYes").onclick = () => {
+      $("mYes").onclick = async () => {
         S.period.from = $("pF").value; S.period.to = $("pT").value;
+        await loadMasters();
         closeModal(); periodLabel(); render();
       };
     });
