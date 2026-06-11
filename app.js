@@ -3008,8 +3008,7 @@ function renderRegisterTable(vouchers, type) {
       const nat = natureOfGroup(top, gmap);
       if (nat === "income" || nat === "expense") return false;
     }
-    const n = name.toLowerCase();
-    if (n.includes("fee") || n.includes("filing") || n.includes("audit") || n.includes("charge") || n.includes("consulting") || n.includes("return")) return false;
+    // Fallback ONLY for unsynced ledgers where metadata is missing
     return /(cgst|sgst|igst|vat|cess|duty|duties|\bgst\b|\btax\b)/i.test(name);
   };
   
