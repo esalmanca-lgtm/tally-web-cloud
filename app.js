@@ -3365,8 +3365,12 @@ function coaScreen(presetFilter = "") {
         const q = d.querySelector(".f").value.toLowerCase().trim();
         
         const gmap = {};
+        let hasExactGroup = false;
         S.groups.forEach(g => {
           gmap[g.name.toLowerCase()] = { parent: g.parent || "" };
+          if (g.name.toLowerCase() === q) {
+            hasExactGroup = true;
+          }
         });
 
         const isDescendant = (groupName, targetGroupName) => {
@@ -3383,11 +3387,30 @@ function coaScreen(presetFilter = "") {
           return false;
         };
 
+        const isDescendantSubstring = (groupName, targetSub) => {
+          if (!groupName || !targetSub) return false;
+          let curr = groupName.toLowerCase();
+          let dLimit = 0;
+          while (curr && dLimit < 30) {
+            if (curr.includes(targetSub)) return true;
+            const parentGroup = gmap[curr] ? gmap[curr].parent : "";
+            curr = parentGroup ? parentGroup.toLowerCase() : "";
+            dLimit++;
+          }
+          return false;
+        };
+
         const rows = S.ledgers.filter((l) => {
           if (!q) return true;
           if (l.name.toLowerCase().includes(q)) return true;
-          if ((l.parent || "").toLowerCase().includes(q)) return true;
-          if (l.parent && isDescendant(l.parent, q)) return true;
+          
+          if (hasExactGroup) {
+            if (l.parent && l.parent.toLowerCase() === q) return true;
+            if (l.parent && isDescendant(l.parent, q)) return true;
+          } else {
+            if ((l.parent || "").toLowerCase().includes(q)) return true;
+            if (l.parent && isDescendantSubstring(l.parent, q)) return true;
+          }
           return false;
         });
 
