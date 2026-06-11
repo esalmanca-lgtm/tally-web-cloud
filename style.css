@@ -915,11 +915,115 @@ textarea.xml {
   #hintbar { display: none; }
   #layout { padding: 8px; }
   .charts-grid { grid-template-columns: 1fr; }
+}/* ==========================================================================
+   Report Builder Styles
+   ========================================================================== */
+.rb-layout {
+  display: flex;
+  height: 100%;
+  gap: 16px;
+  padding: 16px;
+}
+.rb-sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.rb-preview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-glass);
+  padding: 16px;
+  min-width: 0;
+}
+.rb-card {
+  background: var(--paper-alt);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  padding: 12px;
+}
+.rb-card h3 {
+  font-family: var(--font-title);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
+.rb-columns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.rb-columns label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.filter-row label {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.rb-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+.rb-saved-list {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.rb-saved-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.rb-saved-item:hover {
+  background: var(--hl);
+  border-color: var(--hl-strong);
+}
+.rb-saved-item .del {
+  color: var(--dr);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 2px 6px;
 }
 
-/* ==========================================================================
-   Print Stylesheet (Task 3)
-   ========================================================================== */
+@media print {
+  .rb-sidebar { display: none !important; }
+  .rb-preview { border: none !important; padding: 0 !important; }
+}
 
 @media print {
   body {

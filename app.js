@@ -55,14 +55,22 @@ const ex = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 
 async function fetchAll(builder) { // paginate past PostgREST's 1000-row limit
-  let out = [], from = 0;
-  for (;;) {
-    const {data, error} = await builder().range(from, from + 999);
-    if (error) throw new Error(error.message);
-    out = out.concat(data || []);
-    if (!data || data.length < 1000) return out;
-    from += 1000;
+  const { data, count, error } = await builder().setHeader('Prefer', 'count=exact').range(0, 999);
+  if (error) throw new Error(error.message);
+  let out = data || [];
+  if (count === null || count === undefined || count <= 1000 || data.length < 1000) {
+    return out;
   }
+  const pages = [];
+  for (let offset = 1000; offset < count; offset += 1000) {
+    pages.push(builder().range(offset, offset + 999));
+  }
+  const results = await Promise.all(pages);
+  for (const res of results) {
+    if (res.error) throw new Error(res.error.message);
+    out = out.concat(res.data || []);
+  }
+  return out;
 }
 function err(e) { throw new Error(e.message || String(e)); }
 
@@ -154,10 +162,13 @@ const dal = {
     };
   },
 
-  async ledgers() {
-    const rows = await fetchAll(() => sb.from("ledger_balances")
-      .select("name,parent,closing").order("name"));
-    return rows.map((r) => ({name: r.name, parent: r.parent || "", ...fdc(+r.closing)}));
+  async ledgers(dto) {
+    const cl = await dal.closings(dto);
+    return Object.entries(cl).map(([name, v]) => ({
+      name,
+      parent: v.parent || "",
+      ...fdc(v.closing)
+    })).sort((a, b) => a.name.localeCompare(b.name));
   },
 
   async groups() {
@@ -244,6 +255,48 @@ const dal = {
       out[l.name] = {parent: l.parent || "", closing: (+l.opening || 0) + (sums[l.name] || 0)};
     });
     return out;
+  },
+
+  async getStockBalances(date, gmap) {
+    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+    const stockLedgers = leds.filter(l => {
+      const top = l.parent ? topGroup(l.parent, gmap) : "Suspense A/c";
+      return top.toLowerCase() === "stock-in-hand";
+    });
+    if (stockLedgers.length === 0) return 0;
+    
+    const ledgerNames = stockLedgers.map(l => l.name);
+    let query = sb.from("entries").select("ledger,amount");
+    if (date) {
+      query = sb.from("entries").select("ledger,amount,vouchers!inner(date)").lte("vouchers.date", date);
+    }
+    const ents = await fetchAll(() => query.in("ledger", ledgerNames));
+    
+    const sums = {};
+    ents.forEach(e => { sums[e.ledger] = (sums[e.ledger] || 0) + (+e.amount); });
+    
+    let totalStock = 0;
+    stockLedgers.forEach(l => {
+      const closing = (+l.opening || 0) + (sums[l.name] || 0);
+      totalStock += -closing;
+    });
+    return totalStock;
+  },
+
+  async getLedgerClosing(ledger, date) {
+    const { data: ledData, error: ledErr } = await sb.from("ledgers")
+      .select("opening")
+      .eq("name", ledger)
+      .maybeSingle();
+    if (ledErr || !ledData) return 0;
+    
+    let query = sb.from("entries").select("amount");
+    if (date) {
+      query = sb.from("entries").select("amount,vouchers!inner(date)").lte("vouchers.date", date);
+    }
+    const ents = await fetchAll(() => query.eq("ledger", ledger));
+    const sum = ents.reduce((acc, e) => acc + (+e.amount || 0), 0);
+    return (+ledData.opening || 0) + sum;
   },
 
   async trialBalance(dto) {
@@ -438,26 +491,11 @@ const dal = {
     const byTop = await dal.periodNaturedTotals(dfrom, dto);
     
     const prevDate = subDaysYMD(ymd(dfrom), 1);
-    const clFrom = await dal.closings(prevDate);
-    const clTo = await dal.closings(dto);
-    
     const gmap = await getGroupNatureMap();
-    
-    let openingStock = 0, closingStock = 0;
-    for (const [name, v] of Object.entries(clFrom)) {
-      if (isPLLedger(name)) continue;
-      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
-      if (top.toLowerCase() === "stock-in-hand") {
-        openingStock += -v.closing;
-      }
-    }
-    for (const [name, v] of Object.entries(clTo)) {
-      if (isPLLedger(name)) continue;
-      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
-      if (top.toLowerCase() === "stock-in-hand") {
-        closingStock += -v.closing;
-      }
-    }
+    const [openingStock, closingStock] = await Promise.all([
+      dal.getStockBalances(prevDate, gmap),
+      dal.getStockBalances(dto, gmap)
+    ]);
     
     let sales = 0, purchases = 0, directExp = 0, directInc = 0, indirectExp = 0, indirectInc = 0;
     const tradingExpItems = [];
@@ -470,7 +508,7 @@ const dal = {
       if (t === "stock-in-hand" || t === "suspense a/c") continue;
       
       const nat = natureOfGroup(top, gmap);
-      const isDirect = t.includes("direct") || t.includes("purchase") || t.includes("sales");
+      const isDirect = (t.includes("direct") && !t.includes("indirect")) || t.includes("purchase") || t.includes("sales");
       
       if (nat === "income") {
         if (isDirect) {
@@ -939,7 +977,7 @@ async function api(path, opts) {
     case "/api/data-status": return {mode: "cloud",
       company: localStorage.getItem("tw_company") || "", ...(await dal.status())};
     case "/api/companies": return [{name: localStorage.getItem("tw_company") || "", from: ""}];
-    case "/api/ledgers": return dal.ledgers();
+    case "/api/ledgers": return dal.ledgers(q.to);
     case "/api/groups": return dal.groups();
     case "/api/daybook": return dal.daybook(q.from, q.to);
     case "/api/ledger-vouchers": return dal.ledgerVouchers(q.ledger, q.from, q.to);
@@ -1356,6 +1394,7 @@ const GW_ITEMS = [
   {label: "Purchase Register", key: "U", run: () => push(purchaseRegisterScreen())},
   {label: "Cash Flow Statement", key: "F", run: () => push(cashFlowScreen())},
   {label: "Outstanding Aging", key: "A", run: () => push(agingScreen())},
+  {label: "Report Builder", key: "Q", run: () => push(reportBuilderScreen())},
   {section: "Utilities"},
   {label: "Account & Data", key: "F12", run: () => settingsModal()},
 ];
@@ -1442,8 +1481,11 @@ function wireReport(el, loader) {
     periodLabel();
     const out = el.querySelector(".rout");
     out.innerHTML = `<div class="empty">Loading…</div>`;
-    try { out.innerHTML = await loader(); wirePostRender(out); }
-    catch (e) { out.innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
+    try {
+      await loadMasters();
+      out.innerHTML = await loader();
+      wirePostRender(out);
+    } catch (e) { out.innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
   };
   el.querySelector(".reload").onclick = load;
   
@@ -1790,6 +1832,484 @@ function agingScreen() {
   return scr;
 }
 
+function reportBuilderScreen() {
+  const COL_MAP = {
+    ledgers: [
+      { key: "name", label: "Ledger Name", default: true },
+      { key: "parent", label: "Group", default: true },
+      { key: "opening", label: "Opening", default: true, format: "money_bal" },
+      { key: "debitFlow", label: "Debit Flow", default: false, format: "money" },
+      { key: "creditFlow", label: "Credit Flow", default: false, format: "money" },
+      { key: "closing", label: "Closing", default: true, format: "money_bal" },
+      { key: "netFlow", label: "Net Flow", default: false, format: "money_bal" }
+    ],
+    groups: [
+      { key: "name", label: "Group Name", default: true },
+      { key: "parent", label: "Parent Group", default: true },
+      { key: "nature", label: "Nature", default: true },
+      { key: "opening", label: "Opening", default: false, format: "money_bal" },
+      { key: "debitFlow", label: "Debit Flow", default: false, format: "money" },
+      { key: "creditFlow", label: "Credit Flow", default: false, format: "money" },
+      { key: "closing", label: "Closing", default: true, format: "money_bal" }
+    ],
+    vouchers: [
+      { key: "date", label: "Date", default: true, format: "date" },
+      { key: "vchtype", label: "Voucher Type", default: true },
+      { key: "number", label: "Voucher No.", default: true },
+      { key: "party", label: "Party Ledger", default: true },
+      { key: "amount", label: "Amount", default: true, format: "money" },
+      { key: "narration", label: "Narration", default: false },
+      { key: "ledgerList", label: "Ledger Entries", default: false }
+    ]
+  };
+
+  const scr = {
+    title: "Custom Report Builder",
+    render(el) {
+      const d = document.createElement("div");
+      d.style.height = "100%";
+      d.innerHTML = `
+        <div class="rb-layout">
+          <div class="rb-sidebar">
+            <div class="rb-card">
+              <h3>1. Data Source</h3>
+              <select class="rb-source" style="width: 100%">
+                <option value="ledgers">Ledger Balances</option>
+                <option value="groups">Group Summary</option>
+                <option value="vouchers">Vouchers (Daybook)</option>
+              </select>
+            </div>
+            
+            <div class="rb-card">
+              <h3>2. Select Columns</h3>
+              <div class="rb-columns"></div>
+            </div>
+            
+            <div class="rb-card">
+              <h3>3. Filters</h3>
+              <div class="rb-filters">
+                <div class="filter-row">
+                  <label>Date From</label>
+                  <input type="date" class="rb-from" value="${S.period.from}">
+                </div>
+                <div class="filter-row">
+                  <label>Date To</label>
+                  <input type="date" class="rb-to" value="${S.period.to}">
+                </div>
+                <div class="filter-row rb-group-filter-wrap">
+                  <label>Parent Group</label>
+                  <select class="rb-group-filter" style="width:100%"><option value="">All Groups</option></select>
+                </div>
+                <div class="filter-row">
+                  <label>Text Filter</label>
+                  <input class="rb-text-filter" placeholder="Search name/particulars…" style="width:100%">
+                </div>
+                <div class="filter-row rb-bal-filter-wrap">
+                  <label>Min Balance</label>
+                  <input type="number" class="rb-min-bal" placeholder="0" style="width:100%">
+                </div>
+                <div class="filter-row rb-bal-filter-wrap">
+                  <label>Max Balance</label>
+                  <input type="number" class="rb-max-bal" placeholder="Infinity" style="width:100%">
+                </div>
+                <div class="filter-row rb-bal-type-wrap">
+                  <label>Balance Type</label>
+                  <select class="rb-bal-type" style="width:100%">
+                    <option value="all">All</option>
+                    <option value="nonzero">Non-Zero</option>
+                    <option value="dr">Debit Only (Dr)</option>
+                    <option value="cr">Credit Only (Cr)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            
+            <div class="rb-card">
+              <button class="btn gold rb-btn-run" style="width:100%">Run Report</button>
+            </div>
+            
+            <div class="rb-card">
+              <h3>Saved Reports</h3>
+              <div class="rb-saved-list"></div>
+              <div style="display:flex; gap:6px; margin-top:8px;">
+                <input class="rb-save-name" placeholder="Report name…" style="flex:1; min-width:0;">
+                <button class="btn rb-btn-save">Save</button>
+              </div>
+            </div>
+          </div>
+          
+          <div class="rb-preview">
+            <div class="rbar" style="margin-bottom: 12px;">
+              <span style="font-weight:700; font-size:15px; font-family:var(--font-title);">Report Preview</span>
+              <button class="btn outline csv-btn" style="margin-left: auto;">CSV</button>
+              <button class="btn outline print-btn">Print</button>
+            </div>
+            <div class="rb-table-wrap">
+              <div class="empty">Configure columns and click Run Report.</div>
+            </div>
+          </div>
+        </div>
+      `;
+      el.appendChild(d);
+
+      const sourceSelect = d.querySelector(".rb-source");
+      const colsDiv = d.querySelector(".rb-columns");
+      const groupFilter = d.querySelector(".rb-group-filter");
+      const tableWrap = d.querySelector(".rb-table-wrap");
+      const savedList = d.querySelector(".rb-saved-list");
+      const saveNameInput = d.querySelector(".rb-save-name");
+
+      // Load group options in parent group filter
+      const populateGroups = () => {
+        const sorted = [...S.groups].sort((a,b) => a.name.localeCompare(b.name));
+        groupFilter.innerHTML = '<option value="">All Groups</option>' + 
+          sorted.map(g => `<option value="${esc(g.name)}">${esc(g.name)}</option>`).join("");
+      };
+      if (S.groups && S.groups.length) populateGroups();
+      else api("/api/groups").then(grp => { S.groups = grp; populateGroups(); });
+
+      // Load columns based on source
+      const updateColumns = (presetChecked = null) => {
+        const src = sourceSelect.value;
+        const cols = COL_MAP[src];
+        colsDiv.innerHTML = cols.map(c => {
+          const checked = presetChecked ? presetChecked.includes(c.key) : c.default;
+          return `<label><input type="checkbox" data-col="${c.key}" ${checked ? "checked" : ""}> ${esc(c.label)}</label>`;
+        }).join("");
+        
+        // Hide balance options if source is vouchers
+        const isVch = src === "vouchers";
+        d.querySelectorAll(".rb-bal-filter-wrap, .rb-bal-type-wrap").forEach(n => n.style.display = isVch ? "none" : "");
+      };
+      sourceSelect.onchange = () => updateColumns();
+      updateColumns();
+
+      // Render Saved reports
+      const renderSavedList = () => {
+        let saved = [];
+        try { saved = JSON.parse(localStorage.getItem("tw_saved_reports") || "[]"); } catch (e) {}
+        savedList.innerHTML = saved.length ? saved.map((r, idx) => `
+          <div class="rb-saved-item" data-idx="${idx}">
+            <span style="font-weight:500;">${esc(r.name)}</span>
+            <span class="del" data-idx="${idx}">&times;</span>
+          </div>
+        `).join("") : `<div class="empty" style="padding:10px; font-size:11.5px;">No saved reports.</div>`;
+
+        savedList.querySelectorAll(".rb-saved-item").forEach(n => {
+          n.onclick = (e) => {
+            if (e.target.classList.contains("del")) return;
+            const r = saved[+n.dataset.idx];
+            sourceSelect.value = r.source;
+            updateColumns(r.columns);
+            d.querySelector(".rb-from").value = r.from || S.period.from;
+            d.querySelector(".rb-to").value = r.to || S.period.to;
+            groupFilter.value = r.groupFilter || "";
+            d.querySelector(".rb-text-filter").value = r.textFilter || "";
+            d.querySelector(".rb-min-bal").value = r.minBal || "";
+            d.querySelector(".rb-max-bal").value = r.maxBal || "";
+            d.querySelector(".rb-bal-type").value = r.balType || "all";
+            runReport();
+          };
+        });
+
+        savedList.querySelectorAll(".del").forEach(n => {
+          n.onclick = (e) => {
+            e.stopPropagation();
+            const idx = +n.dataset.idx;
+            let saved = [];
+            try { saved = JSON.parse(localStorage.getItem("tw_saved_reports") || "[]"); } catch (e) {}
+            saved.splice(idx, 1);
+            localStorage.setItem("tw_saved_reports", JSON.stringify(saved));
+            renderSavedList();
+          };
+        });
+      };
+      renderSavedList();
+
+      // Save report function
+      d.querySelector(".rb-btn-save").onclick = () => {
+        const name = saveNameInput.value.trim();
+        if (!name) return alert("Please enter a report name.");
+        const checkedCols = Array.from(colsDiv.querySelectorAll("input:checked")).map(n => n.dataset.col);
+        
+        let saved = [];
+        try { saved = JSON.parse(localStorage.getItem("tw_saved_reports") || "[]"); } catch (e) {}
+        saved.push({
+          name,
+          source: sourceSelect.value,
+          columns: checkedCols,
+          from: d.querySelector(".rb-from").value,
+          to: d.querySelector(".rb-to").value,
+          groupFilter: groupFilter.value,
+          textFilter: d.querySelector(".rb-text-filter").value,
+          minBal: d.querySelector(".rb-min-bal").value,
+          maxBal: d.querySelector(".rb-max-bal").value,
+          balType: d.querySelector(".rb-bal-type").value
+        });
+        localStorage.setItem("tw_saved_reports", JSON.stringify(saved));
+        saveNameInput.value = "";
+        renderSavedList();
+      };
+
+      const runReport = async () => {
+        tableWrap.innerHTML = `<div class="empty">Generating report…</div>`;
+        try {
+          const src = sourceSelect.value;
+          const dfrom = d.querySelector(".rb-from").value;
+          const dto = d.querySelector(".rb-to").value;
+          const gf = groupFilter.value;
+          const tf = d.querySelector(".rb-text-filter").value.toLowerCase().trim();
+          const minB = d.querySelector(".rb-min-bal").value ? parseFloat(d.querySelector(".rb-min-bal").value) : null;
+          const maxB = d.querySelector(".rb-max-bal").value ? parseFloat(d.querySelector(".rb-max-bal").value) : null;
+          const balType = d.querySelector(".rb-bal-type").value;
+
+          const gmap = await getGroupNatureMap();
+          
+          let rows = [];
+          if (src === "ledgers") {
+            const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+            const prevDate = ymd(subDaysYMD(ymd(dfrom), 1));
+            const ents = await fetchAll(() => sb.from("entries")
+              .select("ledger,amount,vouchers!inner(date)")
+              .lte("vouchers.date", ymd(dto)));
+              
+            const sumsTo = {};
+            const sumsPrev = {};
+            const flows = {};
+            
+            ents.forEach(e => {
+              const led = e.ledger;
+              const amt = +e.amount || 0;
+              const dStr = e.vouchers.date;
+              sumsTo[led] = (sumsTo[led] || 0) + amt;
+              if (dStr <= prevDate) {
+                sumsPrev[led] = (sumsPrev[led] || 0) + amt;
+              } else if (dStr >= ymd(dfrom)) {
+                if (!flows[led]) flows[led] = { debit: 0, credit: 0 };
+                if (amt < 0) flows[led].debit += Math.abs(amt);
+                else flows[led].credit += amt;
+              }
+            });
+
+            rows = leds.map(l => {
+              const openVal = (+l.opening || 0) + (sumsPrev[l.name] || 0);
+              const flow = flows[l.name] || { debit: 0, credit: 0 };
+              const closeVal = (+l.opening || 0) + (sumsTo[l.name] || 0);
+              return {
+                name: l.name,
+                parent: l.parent || "",
+                opening: openVal,
+                debitFlow: flow.debit,
+                creditFlow: flow.credit,
+                closing: closeVal,
+                netFlow: closeVal - openVal
+              };
+            });
+
+            // Filters
+            if (gf) {
+              rows = rows.filter(r => r.parent && (r.parent === gf || topGroup(r.parent, gmap) === gf));
+            }
+            if (tf) {
+              rows = rows.filter(r => r.name.toLowerCase().includes(tf) || r.parent.toLowerCase().includes(tf));
+            }
+            if (minB !== null) {
+              rows = rows.filter(r => Math.abs(r.closing) >= minB);
+            }
+            if (maxB !== null) {
+              rows = rows.filter(r => Math.abs(r.closing) <= maxB);
+            }
+            if (balType === "nonzero") {
+              rows = rows.filter(r => Math.abs(r.closing) >= 0.005);
+            } else if (balType === "dr") {
+              rows = rows.filter(r => r.closing < -0.004);
+            } else if (balType === "cr") {
+              rows = rows.filter(r => r.closing > 0.004);
+            }
+          } 
+          else if (src === "groups") {
+            const groups = await fetchAll(() => sb.from("groups").select("name,parent,nature"));
+            const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+            const prevDate = ymd(subDaysYMD(ymd(dfrom), 1));
+            const ents = await fetchAll(() => sb.from("entries")
+              .select("ledger,amount,vouchers!inner(date)")
+              .lte("vouchers.date", ymd(dto)));
+              
+            const sumsTo = {};
+            const sumsPrev = {};
+            const flows = {};
+            
+            ents.forEach(e => {
+              const led = e.ledger;
+              const amt = +e.amount || 0;
+              const dStr = e.vouchers.date;
+              sumsTo[led] = (sumsTo[led] || 0) + amt;
+              if (dStr <= prevDate) {
+                sumsPrev[led] = (sumsPrev[led] || 0) + amt;
+              } else if (dStr >= ymd(dfrom)) {
+                if (!flows[led]) flows[led] = { debit: 0, credit: 0 };
+                if (amt < 0) flows[led].debit += Math.abs(amt);
+                else flows[led].credit += amt;
+              }
+            });
+
+            const ledRows = leds.map(l => {
+              const openVal = (+l.opening || 0) + (sumsPrev[l.name] || 0);
+              const flow = flows[l.name] || { debit: 0, credit: 0 };
+              const closeVal = (+l.opening || 0) + (sumsTo[l.name] || 0);
+              return {
+                parent: l.parent || "",
+                opening: openVal,
+                debitFlow: flow.debit,
+                creditFlow: flow.credit,
+                closing: closeVal
+              };
+            });
+
+            const grpMap = {};
+            groups.forEach(g => {
+              grpMap[g.name.toLowerCase()] = {
+                name: g.name,
+                parent: g.parent || "",
+                nature: g.nature || "",
+                opening: 0,
+                debitFlow: 0,
+                creditFlow: 0,
+                closing: 0
+              };
+            });
+
+            const rollup = (parentName, open, deb, cred, close) => {
+              if (!parentName) return;
+              const key = parentName.toLowerCase();
+              const p = grpMap[key];
+              if (p) {
+                p.opening += open;
+                p.debitFlow += deb;
+                p.creditFlow += cred;
+                p.closing += close;
+                rollup(p.parent, open, deb, cred, close);
+              }
+            };
+
+            ledRows.forEach(r => {
+              rollup(r.parent, r.opening, r.debitFlow, r.creditFlow, r.closing);
+            });
+
+            rows = Object.values(grpMap);
+
+            // Filters
+            if (gf) {
+              rows = rows.filter(r => r.name === gf || r.parent === gf || topGroup(r.name, gmap) === gf);
+            }
+            if (tf) {
+              rows = rows.filter(r => r.name.toLowerCase().includes(tf) || r.parent.toLowerCase().includes(tf));
+            }
+            if (minB !== null) {
+              rows = rows.filter(r => Math.abs(r.closing) >= minB);
+            }
+            if (maxB !== null) {
+              rows = rows.filter(r => Math.abs(r.closing) <= maxB);
+            }
+            if (balType === "nonzero") {
+              rows = rows.filter(r => Math.abs(r.closing) >= 0.005);
+            } else if (balType === "dr") {
+              rows = rows.filter(r => r.closing < -0.004);
+            } else if (balType === "cr") {
+              rows = rows.filter(r => r.closing > 0.004);
+            }
+          } 
+          else if (src === "vouchers") {
+            const vchs = await fetchAll(() => sb.from("vouchers")
+              .select("*, entries(ledger,amount)")
+              .gte("date", ymd(dfrom))
+              .lte("date", ymd(dto))
+              .order("date").order("id"));
+              
+            rows = vchs.map(v => {
+              let totalDr = 0;
+              v.entries.forEach(e => {
+                if (+e.amount < 0) totalDr += -e.amount;
+              });
+              return {
+                date: v.date,
+                vchtype: v.vchtype,
+                number: v.number,
+                party: v.party,
+                amount: totalDr,
+                narration: v.narration,
+                ledgerList: v.entries.map(e => `${e.ledger} (${e.amount < 0 ? money(-e.amount) + ' Dr' : money(e.amount) + ' Cr'})`).join(", ")
+              };
+            });
+
+            // Filters
+            if (tf) {
+              rows = rows.filter(r => r.party.toLowerCase().includes(tf) || 
+                                      r.narration.toLowerCase().includes(tf) ||
+                                      r.vchtype.toLowerCase().includes(tf) ||
+                                      r.ledgerList.toLowerCase().includes(tf));
+            }
+          }
+
+          // Render preview table
+          const checkedCols = Array.from(colsDiv.querySelectorAll("input:checked")).map(n => n.dataset.col);
+          const colsDef = COL_MAP[src].filter(c => checkedCols.includes(c.key));
+
+          if (!rows.length) {
+            tableWrap.innerHTML = `<div class="empty">No records found matching filters.</div>`;
+            return;
+          }
+
+          let html = `<table><thead><tr>`;
+          colsDef.forEach(c => {
+            const isRight = c.format && c.format.startsWith("money");
+            html += `<th style="${isRight ? 'text-align:right' : ''}">${esc(c.label)}</th>`;
+          });
+          html += `</tr></thead><tbody>`;
+
+          rows.forEach(r => {
+            html += `<tr>`;
+            colsDef.forEach(c => {
+              const val = r[c.key];
+              const isRight = c.format && c.format.startsWith("money");
+              let text = "";
+              let cls = "";
+              if (c.format === "money_bal") {
+                const bObj = fdc(val);
+                text = bObj.amount ? money(bObj.amount) + " " + bObj.side : "—";
+                cls = bObj.side === "Dr" ? "dr" : (bObj.side === "Cr" ? "cr" : "");
+              } else if (c.format === "money") {
+                text = val ? money(val) : "—";
+              } else if (c.format === "date") {
+                text = tdate(val.slice(0,4) + "-" + val.slice(4,6) + "-" + val.slice(6,8));
+              } else {
+                text = val != null ? esc(val) : "";
+              }
+              html += `<td class="${isRight ? 'num' : ''} ${cls}" style="${isRight ? 'text-align:right;' : ''}">${text}</td>`;
+            });
+            html += `</tr>`;
+          });
+
+          html += `</tbody></table>`;
+          tableWrap.innerHTML = html;
+          wirePostRender(tableWrap);
+        } catch (e) {
+          tableWrap.innerHTML = `<div class="errbox">${esc(e.message)}</div>`;
+        }
+      };
+
+      d.querySelector(".rb-btn-run").onclick = runReport;
+
+      // Wire CSV and Print buttons in preview pane
+      d.querySelector(".csv-btn").onclick = () => {
+        downloadCSV("Custom_Report_" + sourceSelect.value, tableWrap.querySelector("table"));
+      };
+      d.querySelector(".print-btn").onclick = () => window.print();
+    }
+  };
+  return scr;
+}
+
 function daybookScreen() {
   const scr = {
     title: "Day Book",
@@ -1937,9 +2457,7 @@ function ledVchScreen(ledger) {
         if (!led) return `<div class="empty">Type a ledger name and press Load.</div>`;
         
         const prevDate = new Date(new Date(S.period.from) - 86400000).toISOString().slice(0, 10);
-        const openClosings = await dal.closings(ymd(prevDate));
-        const plLedger = openClosings[led];
-        const openingVal = plLedger ? plLedger.closing : 0;
+        const openingVal = await dal.getLedgerClosing(led, ymd(prevDate));
         
         const vouchers = await api(`/api/ledger-vouchers?ledger=${encodeURIComponent(led)}&from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`);
         
@@ -3301,7 +3819,9 @@ document.querySelectorAll("#btnbar button").forEach((b) => {
 /* ----------------------------------------------------------------- boot --- */
 async function loadMasters(flash) {
   try {
-    const [led, grp] = await Promise.all([api("/api/ledgers"), api("/api/groups")]);
+    const toDate = S.period.to ? ymd(S.period.to) : "";
+    const ledUrl = toDate ? `/api/ledgers?to=${toDate}` : "/api/ledgers";
+    const [led, grp] = await Promise.all([api(ledUrl), api("/api/groups")]);
     S.ledgers = led; S.groups = grp;
     S.groupNatures = {};
     grp.forEach(g => {
