@@ -2989,7 +2989,7 @@ function columnarTrialTable(data) {
 
 function renderRegisterTable(vouchers, type) {
   if (!vouchers.length) return `<div class="empty">No entries in this period.</div>`;
-  const isGstLedger = (name) => /(gst|tax|cgst|sgst|igst|vat)/i.test(name);
+  const isGstLedger = (name) => /(gst|tax|cgst|sgst|igst|vat|cess|duty|duties)/i.test(name);
   
   let totalTaxable = 0;
   let totalGst = 0;
@@ -2999,6 +2999,7 @@ function renderRegisterTable(vouchers, type) {
     let partyAmt = 0;
     let gstAmt = 0;
     let taxableAmt = 0;
+    let acctLedgers = [];
     
     v.entries.forEach(e => {
       if (v.party && e.ledger === v.party) {
@@ -3019,12 +3020,14 @@ function renderRegisterTable(vouchers, type) {
         gstAmt += amt;
       } else {
         taxableAmt += amt;
+        if (!acctLedgers.includes(e.ledger)) acctLedgers.push(e.ledger);
       }
     });
     
     if (partyAmt === 0) {
       gstAmt = 0;
       taxableAmt = 0;
+      acctLedgers = [];
       v.entries.forEach(e => {
         const partySide = type === "Sales" ? "Dr" : "Cr";
         if (e.side === partySide) {
@@ -3034,6 +3037,7 @@ function renderRegisterTable(vouchers, type) {
             gstAmt += e.amount;
           } else {
             taxableAmt += e.amount;
+            if (!acctLedgers.includes(e.ledger)) acctLedgers.push(e.ledger);
           }
         }
       });
@@ -3048,12 +3052,15 @@ function renderRegisterTable(vouchers, type) {
       date: v.date,
       number: v.number,
       party: v.party || v.narration || "",
+      acctLedger: acctLedgers.join(", "),
       taxable: taxableAmt,
       gst: gstAmt,
       gross,
       v
     };
   });
+  
+  const acctColName = type === "Sales" ? "Sales Ledger" : "Purchase Ledger";
   
   return `
     <table>
@@ -3062,6 +3069,7 @@ function renderRegisterTable(vouchers, type) {
           <th>Date</th>
           <th>${type === "Sales" ? "Invoice No." : "Bill No."}</th>
           <th>${type === "Sales" ? "Customer Name" : "Supplier Name"}</th>
+          <th>${acctColName}</th>
           <th style="text-align:right">Taxable Value</th>
           <th style="text-align:right">GST Amount</th>
           <th style="text-align:right">Gross Value</th>
@@ -3073,13 +3081,14 @@ function renderRegisterTable(vouchers, type) {
             <td class="num">${esc(p.date)}</td>
             <td class="num">${esc(p.number)}</td>
             <td>${esc(p.party)}</td>
+            <td>${esc(p.acctLedger)}</td>
             <td class="num">${p.taxable ? money(p.taxable) : "0.00"}</td>
             <td class="num">${p.gst ? money(p.gst) : "0.00"}</td>
             <td class="num" style="font-weight:600;">${money(p.gross)}</td>
           </tr>
         `).join("")}
         <tr class="total">
-          <td colspan="3">Total</td>
+          <td colspan="4">Total</td>
           <td class="num">${money(totalTaxable)}</td>
           <td class="num">${money(totalGst)}</td>
           <td class="num">${money(totalGross)}</td>
