@@ -114,24 +114,33 @@ async function getGroupNatureMap() {
 function natureOfGroup(groupName, gmap) {
   if (!groupName) return "asset";
   const nameLower = groupName.toLowerCase();
+  
+  if (INC_T.has(nameLower)) return "income";
+  if (EXP_T.has(nameLower)) return "expense";
+  if (LIAB_T.has(nameLower)) return "liability";
+  if (ASSET_T.has(nameLower)) return "asset";
+  
   const g = gmap[nameLower];
   if (g && g.nature) return g.nature;
   let parent = g ? g.parent : "";
   let depth = 0;
   while (parent && depth < 30) {
-    const pg = gmap[parent.toLowerCase()];
+    const pLower = parent.toLowerCase();
+    if (INC_T.has(pLower)) return "income";
+    if (EXP_T.has(pLower)) return "expense";
+    if (LIAB_T.has(pLower)) return "liability";
+    if (ASSET_T.has(pLower)) return "asset";
+    const pg = gmap[pLower];
     if (pg && pg.nature) return pg.nature;
     parent = pg ? pg.parent : "";
     depth++;
   }
+  
   const n = nameLower;
   if (n.includes("capital") || n.includes("loan") || n.includes("liab") || n.includes("creditor") || n.includes("tax") || n.includes("provision") || n.includes("reserve")) return "liability";
   if (n.includes("asset") || n.includes("bank") || n.includes("cash") || n.includes("stock") || n.includes("debtor") || n.includes("deposit") || n.includes("advance") || n === "suspense a/c") return "asset";
   if (n.includes("sales") || n.includes("income") || n.includes("revenue")) return "income";
   if (n.includes("purchase") || n.includes("expense") || n.includes("cost") || n.includes("expenditure")) return "expense";
-  if (INC_T.has(nameLower)) return "income";
-  if (EXP_T.has(nameLower)) return "expense";
-  if (LIAB_T.has(nameLower)) return "liability";
   return "asset";
 }
 const DEFAULT_GROUPS = ["Bank Accounts","Bank OD A/c","Branch / Divisions","Capital Account","Cash-in-Hand","Current Assets","Current Liabilities","Deposits (Asset)","Direct Expenses","Direct Incomes","Duties & Taxes","Fixed Assets","Indirect Expenses","Indirect Incomes","Investments","Loans & Advances (Asset)","Loans (Liability)","Misc. Expenses (ASSET)","Provisions","Purchase Accounts","Reserves & Surplus","Sales Accounts","Secured Loans","Stock-in-Hand","Sundry Creditors","Sundry Debtors","Suspense A/c","Unsecured Loans"];
@@ -636,7 +645,7 @@ const dal = {
       if (t === "stock-in-hand" || t === "suspense a/c") continue;
       
       const nat = natureOfGroup(top, gmap);
-      const isDirect = (t.includes("direct") && !t.includes("indirect")) || t.includes("purchase") || t.includes("sales");
+      const isDirect = t === "sales accounts" || t === "purchase accounts" || t === "direct incomes" || t === "direct expenses" || t === "income (direct)" || t === "expenses (direct)";
       
       if (nat === "income") {
         if (isDirect) {
