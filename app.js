@@ -8,6 +8,22 @@ const esc = (s) => String(s ?? "").replace(/[&<>"\']/g,
 const norm = (s) => String(s ?? "").replaceAll("\xa0", " ").replace(/\s+/g, " ").trim();
 const money = (n) => Number(n || 0).toLocaleString("en-IN", {minimumFractionDigits: 2});
 const ymd = (iso) => (iso || "").replaceAll("-", "");
+const isPLLedger = (name) => {
+  const n = String(name ?? "").toLowerCase().replace(/\s+/g, "");
+  return n === "profit&lossa/c" || n === "profit&lossaccount";
+};
+const subDaysYMD = (ymdStr, days = 1) => {
+  if (!ymdStr || ymdStr.toLowerCase().includes("invalid")) return "";
+  const cleanStr = (ymdStr || "").replaceAll("-", "");
+  if (cleanStr.length !== 8) return "";
+  const y = parseInt(cleanStr.slice(0, 4));
+  const m = parseInt(cleanStr.slice(4, 6)) - 1;
+  const d = parseInt(cleanStr.slice(6, 8));
+  const date = new Date(y, m, d);
+  date.setDate(date.getDate() - days);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
+};
 const tdate = (iso) => { // 2026-06-11 -> 11-Jun-26
   if (!iso) return "";
   const d = new Date(iso + "T00:00:00");
@@ -56,15 +72,58 @@ const INC_T   = new Set(["sales accounts","direct incomes","indirect incomes","i
 const EXP_T   = new Set(["purchase accounts","direct expenses","indirect expenses","expenses (direct)","expenses (indirect)"]);
 function topGroup(name, gmap, depth = 0) {
   if (!name || depth > 30) return name || "";
-  const p = gmap[name.toLowerCase()];
+  const item = gmap[name.toLowerCase()];
+  const p = item && typeof item === "object" ? item.parent : item;
   if (!p || ["", "primary"].includes(p.toLowerCase()) || p.toLowerCase() === name.toLowerCase()) return name;
   return topGroup(p, gmap, depth + 1);
 }
 function natureOf(top) {
-  const t = (top || "").toLowerCase();
+  if (!top) return "asset";
+  const t = top.toLowerCase();
+  if (window.S && window.S.groupNatures && window.S.groupNatures[t]) {
+    return window.S.groupNatures[t];
+  }
   if (INC_T.has(t)) return "income";
   if (EXP_T.has(t)) return "expense";
   if (LIAB_T.has(t)) return "liability";
+  return "asset";
+}
+async function getGroupNatureMap() {
+  const gmap = {};
+  try {
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent,nature"));
+    grows.forEach((g) => {
+      gmap[g.name.toLowerCase()] = { parent: g.parent || "", nature: g.nature || "" };
+    });
+  } catch (e) {
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    grows.forEach((g) => {
+      gmap[g.name.toLowerCase()] = { parent: g.parent || "", nature: "" };
+    });
+  }
+  return gmap;
+}
+function natureOfGroup(groupName, gmap) {
+  if (!groupName) return "asset";
+  const nameLower = groupName.toLowerCase();
+  const g = gmap[nameLower];
+  if (g && g.nature) return g.nature;
+  let parent = g ? g.parent : "";
+  let depth = 0;
+  while (parent && depth < 30) {
+    const pg = gmap[parent.toLowerCase()];
+    if (pg && pg.nature) return pg.nature;
+    parent = pg ? pg.parent : "";
+    depth++;
+  }
+  const n = nameLower;
+  if (n.includes("capital") || n.includes("loan") || n.includes("liab") || n.includes("creditor") || n.includes("tax") || n.includes("provision") || n.includes("reserve")) return "liability";
+  if (n.includes("asset") || n.includes("bank") || n.includes("cash") || n.includes("stock") || n.includes("debtor") || n.includes("deposit") || n.includes("advance") || n === "suspense a/c") return "asset";
+  if (n.includes("sales") || n.includes("income") || n.includes("revenue")) return "income";
+  if (n.includes("purchase") || n.includes("expense") || n.includes("cost") || n.includes("expenditure")) return "expense";
+  if (INC_T.has(nameLower)) return "income";
+  if (EXP_T.has(nameLower)) return "expense";
+  if (LIAB_T.has(nameLower)) return "liability";
   return "asset";
 }
 const DEFAULT_GROUPS = ["Bank Accounts","Bank OD A/c","Branch / Divisions","Capital Account","Cash-in-Hand","Current Assets","Current Liabilities","Deposits (Asset)","Direct Expenses","Direct Incomes","Duties & Taxes","Fixed Assets","Indirect Expenses","Indirect Incomes","Investments","Loans & Advances (Asset)","Loans (Liability)","Misc. Expenses (ASSET)","Provisions","Purchase Accounts","Reserves & Surplus","Sales Accounts","Secured Loans","Stock-in-Hand","Sundry Creditors","Sundry Debtors","Suspense A/c","Unsecured Loans"];
@@ -102,8 +161,13 @@ const dal = {
   },
 
   async groups() {
-    const rows = await fetchAll(() => sb.from("groups").select("name,parent").order("name"));
-    return rows.length ? rows : DEFAULT_GROUPS.map((g) => ({name: g, parent: ""}));
+    try {
+      const rows = await fetchAll(() => sb.from("groups").select("name,parent,nature").order("name"));
+      return rows.length ? rows : DEFAULT_GROUPS.map((g) => ({name: g, parent: "", nature: ""}));
+    } catch (e) {
+      const rows = await fetchAll(() => sb.from("groups").select("name,parent").order("name"));
+      return rows.map((r) => ({name: r.name, parent: r.parent || "", nature: ""}));
+    }
   },
 
   shapeVouchers(rows) {
@@ -200,22 +264,16 @@ const dal = {
   },
 
   async columnarTrialBalance(dfrom, dto) {
-    const prevDate = new Date(new Date(dfrom) - 86400000).toISOString().slice(0, 10);
-    const openCl = await dal.closings(ymd(prevDate));
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+    
+    const prevDate = subDaysYMD(ymd(dfrom), 1);
+    const openCl = await dal.closings(prevDate);
     const ents = await fetchAll(() => sb.from("entries")
       .select("ledger,amount,vouchers!inner(date)")
       .gte("vouchers.date", ymd(dfrom))
       .lte("vouchers.date", ymd(dto)));
-    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
-    const gmap = {};
-    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
-    const groupTotals = {};
-    const initGroup = (g) => {
-      if (!groupTotals[g]) {
-        groupTotals[g] = { openDr: 0, openCr: 0, debitFlow: 0, creditFlow: 0 };
-      }
-    };
-    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
+    
     const ledFlows = {};
     ents.forEach(e => {
       if (!ledFlows[e.ledger]) ledFlows[e.ledger] = { debitFlow: 0, creditFlow: 0 };
@@ -223,42 +281,38 @@ const dal = {
       if (amt < 0) ledFlows[e.ledger].debitFlow += Math.abs(amt);
       else ledFlows[e.ledger].creditFlow += Math.abs(amt);
     });
-    leds.forEach(l => {
-      const openVal = openCl[l.name] ? openCl[l.name].closing : 0;
+    
+    const rawLedgers = leds.map(l => {
+      const openVal = openCl[l.name] ? openCl[l.name].closing : (+l.opening || 0);
       const flows = ledFlows[l.name] || { debitFlow: 0, creditFlow: 0 };
-      const parentGroup = l.parent || "";
-      const top = parentGroup ? topGroup(parentGroup, gmap) : (l.name.toLowerCase() === "profit & loss a/c" ? "Profit & Loss A/c" : "Suspense A/c");
-      initGroup(top);
-      if (openVal < 0) groupTotals[top].openDr += Math.abs(openVal);
-      else groupTotals[top].openCr += Math.abs(openVal);
-      groupTotals[top].debitFlow += flows.debitFlow;
-      groupTotals[top].creditFlow += flows.creditFlow;
-    });
-    return Object.entries(groupTotals).map(([name, t]) => {
-      const openNet = t.openCr - t.openDr;
-      const flowNet = t.creditFlow - t.debitFlow;
-      const closeNet = openNet + flowNet;
+      const closeVal = openVal + (flows.creditFlow - flows.debitFlow);
+      
       return {
-        name,
-        openDr: Math.round(t.openDr * 100) / 100,
-        openCr: Math.round(t.openCr * 100) / 100,
-        debit: Math.round(t.debitFlow * 100) / 100,
-        credit: Math.round(t.creditFlow * 100) / 100,
-        closeDr: closeNet < 0 ? Math.round(Math.abs(closeNet) * 100) / 100 : 0,
-        closeCr: closeNet > 0 ? Math.round(Math.abs(closeNet) * 100) / 100 : 0
+        name: l.name,
+        parent: l.parent || "",
+        isLedger: true,
+        openDr: openVal < 0 ? Math.abs(openVal) : 0,
+        openCr: openVal > 0 ? openVal : 0,
+        debit: flows.debitFlow,
+        credit: flows.creditFlow,
+        closeDr: closeVal < 0 ? Math.abs(closeVal) : 0,
+        closeCr: closeVal > 0 ? closeVal : 0
       };
-    }).filter(g => g.openDr || g.openCr || g.debit || g.credit);
+    });
+    
+    return {
+      groups: grows,
+      ledgers: rawLedgers
+    };
   },
 
   async naturedTotals(dto) {
     const cl = await dal.closings(dto);
-    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
-    const gmap = {};
-    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
+    const gmap = await getGroupNatureMap();
     const byTop = {};
     for (const [name, v] of Object.entries(cl)) {
       if (Math.abs(v.closing) < 0.005) continue;
-      if (name.toLowerCase() === "profit & loss a/c") continue;
+      if (isPLLedger(name)) continue;
       const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
       byTop[top] = (byTop[top] || 0) + v.closing;
     }
@@ -267,44 +321,114 @@ const dal = {
 
   async balanceSheet(dto) {
     const cl = await dal.closings(dto);
-    const byTop = await dal.naturedTotals(dto);
+    const gmap = await getGroupNatureMap();
+    
+    let plOpening = 0;
+    const plKey = Object.keys(cl).find(isPLLedger);
+    if (plKey) {
+      plOpening = cl[plKey].closing;
+    }
+    
+    const byTop = {};
+    for (const [name, v] of Object.entries(cl)) {
+      if (Math.abs(v.closing) < 0.005) continue;
+      if (isPLLedger(name)) continue;
+      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
+      byTop[top] = (byTop[top] || 0) + v.closing;
+    }
+    
+    let currentPnl = 0;
+    for (const [top, val] of Object.entries(byTop)) {
+      const nat = natureOfGroup(top, gmap);
+      if (nat === "income" || nat === "expense") {
+        currentPnl += val;
+      }
+    }
+    
+    const totalPnl = plOpening + currentPnl;
+    
     const liab = [], asset = [];
-    let pnl = 0;
-    const plLedger = cl["Profit & Loss A/c"];
-    if (plLedger) {
-      pnl += plLedger.closing;
+    for (const [top, val] of Object.entries(byTop)) {
+      const nat = natureOfGroup(top, gmap);
+      if (nat === "income" || nat === "expense") continue;
+      if (nat === "liability") {
+        liab.push({name: top, ...fdc(val)});
+      } else {
+        asset.push({name: top, ...fdc(val)});
+      }
     }
-    for (const top of Object.keys(byTop).sort()) {
-      const val = byTop[top], nat = natureOf(top);
-      if (nat === "income" || nat === "expense") pnl += val;
-      else if (nat === "liability") liab.push({name: top, ...fdc(val)});
-      else asset.push({name: top, ...fdc(val)});
+    
+    if (Math.abs(totalPnl) >= 0.005) {
+      liab.push({name: "Profit & Loss A/c", ...fdc(totalPnl)});
     }
-    return [{name: "— LIABILITIES —", amount: 0, side: ""}, ...liab,
-            {name: "Profit & Loss A/c", ...fdc(pnl)},
-            {name: "— ASSETS —", amount: 0, side: ""}, ...asset];
+    
+    const totalLiabVal = liab.reduce((s, r) => s + (r.side === "Cr" ? r.amount : -r.amount), 0);
+    const totalAssetVal = asset.reduce((s, r) => s + (r.side === "Dr" ? r.amount : -r.amount), 0);
+    
+    const diff = totalLiabVal - totalAssetVal;
+    if (Math.abs(diff) > 0.005) {
+      if (diff > 0) {
+        asset.push({name: "Difference in Opening Balances", amount: Math.round(Math.abs(diff) * 100) / 100, side: "Dr"});
+      } else {
+        liab.push({name: "Difference in Opening Balances", amount: Math.round(Math.abs(diff) * 100) / 100, side: "Cr"});
+      }
+    }
+    
+    const finalLiabTotal = liab.reduce((s, r) => s + (r.side === "Cr" ? r.amount : -r.amount), 0);
+    const finalAssetTotal = asset.reduce((s, r) => s + (r.side === "Dr" ? r.amount : -r.amount), 0);
+    
+    const sortedLiab = liab.filter(r => r.name !== "Profit & Loss A/c" && r.name !== "Difference in Opening Balances")
+      .sort((a,b) => a.name.localeCompare(b.name));
+    const plRow = liab.find(r => r.name === "Profit & Loss A/c");
+    const diffLiabRow = liab.find(r => r.name === "Difference in Opening Balances");
+    if (plRow) sortedLiab.push(plRow);
+    if (diffLiabRow) sortedLiab.push(diffLiabRow);
+
+    const sortedAsset = asset.filter(r => r.name !== "Difference in Opening Balances")
+      .sort((a,b) => a.name.localeCompare(b.name));
+    const diffAssetRow = asset.find(r => r.name === "Difference in Opening Balances");
+    if (diffAssetRow) sortedAsset.push(diffAssetRow);
+    
+    return {
+      type: "balanceSheet",
+      liabilities: sortedLiab,
+      assets: sortedAsset,
+      liabTotal: Math.round(Math.abs(finalLiabTotal) * 100) / 100,
+      assetTotal: Math.round(Math.abs(finalAssetTotal) * 100) / 100
+    };
   },
 
   async periodNaturedTotals(dfrom, dto) {
-    const clTo = await dal.closings(dto);
-    const prevDate = new Date(new Date(dfrom) - 86400000).toISOString().slice(0, 10);
-    const clFrom = await dal.closings(ymd(prevDate));
+    const gmap = await getGroupNatureMap();
+    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent,opening"));
     
-    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
-    const gmap = {};
-    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
+    const ents = await fetchAll(() => sb.from("entries")
+      .select("ledger,amount,vouchers!inner(date)")
+      .gte("vouchers.date", ymd(dfrom))
+      .lte("vouchers.date", ymd(dto)));
+    
+    const sums = {};
+    ents.forEach(e => { sums[e.ledger] = (sums[e.ledger] || 0) + (+e.amount); });
+    
+    const fromY = parseInt(dfrom.slice(0, 4));
+    const fromM = parseInt(dfrom.slice(4, 6));
+    const fyStartYear = fromM >= 4 ? fromY : fromY - 1;
+    const fyStartDateStr = `${fyStartYear}0401`;
+    
+    const includeOpening = ymd(dfrom) <= fyStartDateStr;
     
     const byTop = {};
-    for (const [name, v] of Object.entries(clTo)) {
-      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
-      const nat = natureOf(top);
-      let val = v.closing;
+    for (const l of leds) {
+      if (isPLLedger(l.name)) continue;
+      const top = l.parent ? topGroup(l.parent, gmap) : "Suspense A/c";
+      let val = sums[l.name] || 0;
+      const nat = natureOfGroup(top, gmap);
       if (nat === "income" || nat === "expense") {
-        const startVal = clFrom[name] ? clFrom[name].closing : 0;
-        val = val - startVal;
+        if (includeOpening) {
+          val += (+l.opening || 0);
+        }
       }
       if (Math.abs(val) < 0.005) continue;
-      if (name.toLowerCase() === "profit & loss a/c") continue;
       byTop[top] = (byTop[top] || 0) + val;
     }
     return byTop;
@@ -312,16 +436,126 @@ const dal = {
 
   async pnl(dfrom, dto) {
     const byTop = await dal.periodNaturedTotals(dfrom, dto);
-    const inc = [], exp = [];
-    let net = 0;
-    for (const top of Object.keys(byTop).sort()) {
-      const val = byTop[top], nat = natureOf(top);
-      if (nat === "income") { inc.push({name: top, ...fdc(val)}); net += val; }
-      else if (nat === "expense") { exp.push({name: top, ...fdc(val)}); net += val; }
+    
+    const prevDate = subDaysYMD(ymd(dfrom), 1);
+    const clFrom = await dal.closings(prevDate);
+    const clTo = await dal.closings(dto);
+    
+    const gmap = await getGroupNatureMap();
+    
+    let openingStock = 0, closingStock = 0;
+    for (const [name, v] of Object.entries(clFrom)) {
+      if (isPLLedger(name)) continue;
+      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
+      if (top.toLowerCase() === "stock-in-hand") {
+        openingStock += -v.closing;
+      }
     }
-    return [{name: "— INCOME —", amount: 0, side: ""}, ...inc,
-            {name: "— EXPENSES —", amount: 0, side: ""}, ...exp,
-            {name: net >= 0 ? "Net Profit" : "Net Loss", ...fdc(net)}];
+    for (const [name, v] of Object.entries(clTo)) {
+      if (isPLLedger(name)) continue;
+      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
+      if (top.toLowerCase() === "stock-in-hand") {
+        closingStock += -v.closing;
+      }
+    }
+    
+    let sales = 0, purchases = 0, directExp = 0, directInc = 0, indirectExp = 0, indirectInc = 0;
+    const tradingExpItems = [];
+    const tradingIncItems = [];
+    const pnlExpItems = [];
+    const pnlIncItems = [];
+    
+    for (const [top, val] of Object.entries(byTop)) {
+      const t = top.toLowerCase();
+      if (t === "stock-in-hand" || t === "suspense a/c") continue;
+      
+      const nat = natureOfGroup(top, gmap);
+      const isDirect = t.includes("direct") || t.includes("purchase") || t.includes("sales");
+      
+      if (nat === "income") {
+        if (isDirect) {
+          directInc += val;
+          tradingIncItems.push({name: top, ...fdc(val)});
+        } else {
+          indirectInc += val;
+          pnlIncItems.push({name: top, ...fdc(val)});
+        }
+      } else if (nat === "expense") {
+        if (isDirect) {
+          directExp += val;
+          tradingExpItems.push({name: top, ...fdc(val)});
+        } else {
+          indirectExp += val;
+          pnlExpItems.push({name: top, ...fdc(val)});
+        }
+      }
+    }
+    
+    tradingExpItems.sort((a,b) => a.name.localeCompare(b.name));
+    tradingIncItems.sort((a,b) => a.name.localeCompare(b.name));
+    pnlExpItems.sort((a,b) => a.name.localeCompare(b.name));
+    pnlIncItems.sort((a,b) => a.name.localeCompare(b.name));
+    
+    if (openingStock) {
+      tradingExpItems.unshift({name: "Opening Stock", ...fdc(-openingStock)});
+    }
+    if (closingStock) {
+      tradingIncItems.push({name: "Closing Stock", ...fdc(closingStock)});
+    }
+    
+    const creditTradingSum = (directInc) + closingStock;
+    const debitTradingSum = (directExp) + openingStock;
+    
+    const grossProfit = creditTradingSum + debitTradingSum;
+    
+    const tradingLeft = [...tradingExpItems];
+    const tradingRight = [...tradingIncItems];
+    
+    let gpVal = 0, glVal = 0;
+    if (grossProfit >= 0) {
+      gpVal = grossProfit;
+      tradingLeft.push({name: "Gross Profit c/o", ...fdc(-grossProfit)});
+    } else {
+      glVal = -grossProfit;
+      tradingRight.push({name: "Gross Loss c/o", ...fdc(grossProfit)});
+    }
+    
+    const tradingTotal = Math.max(
+      tradingLeft.reduce((s, r) => s + (r.side === "Dr" ? r.amount : -r.amount), 0),
+      tradingRight.reduce((s, r) => s + (r.side === "Cr" ? r.amount : -r.amount), 0)
+    );
+    
+    const pnlLeft = [...pnlExpItems];
+    const pnlRight = [...pnlIncItems];
+    
+    if (grossProfit >= 0) {
+      pnlRight.unshift({name: "Gross Profit b/d", ...fdc(grossProfit)});
+    } else {
+      pnlLeft.unshift({name: "Gross Loss b/d", ...fdc(-grossProfit)});
+    }
+    
+    const netProfit = grossProfit + indirectInc + indirectExp;
+    
+    if (netProfit >= 0) {
+      pnlLeft.push({name: "Net Profit", ...fdc(-netProfit)});
+    } else {
+      pnlRight.push({name: "Net Loss", ...fdc(netProfit)});
+    }
+    
+    const pnlTotal = Math.max(
+      pnlLeft.reduce((s, r) => s + (r.side === "Dr" ? r.amount : -r.amount), 0),
+      pnlRight.reduce((s, r) => s + (r.side === "Cr" ? r.amount : -r.amount), 0)
+    );
+    
+    return {
+      type: "pnl",
+      tradingLeft,
+      tradingRight,
+      pnlLeft,
+      pnlRight,
+      tradingTotal: Math.round(Math.abs(tradingTotal) * 100) / 100,
+      pnlTotal: Math.round(Math.abs(pnlTotal) * 100) / 100
+    };
   },
 
   async createLedger(b) {
@@ -338,17 +572,75 @@ const dal = {
     const cr = b.rows.filter((r) => r.side === "Cr").reduce((s, r) => s + +r.amount, 0);
     if (Math.abs(dr - cr) > 0.005)
       return {ok: false, lineerror: `Voucher not balanced (Dr ${dr.toFixed(2)} / Cr ${cr.toFixed(2)})`};
+      
+    // Enforce cash/bank guard-rails
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    const gmap = {};
+    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
+    
+    const leds = await fetchAll(() => sb.from("ledgers").select("name,parent"));
+    const ledParent = {};
+    leds.forEach((l) => { ledParent[l.name.toLowerCase()] = l.parent || ""; });
+    
+    const isCashBank = (ledgerName) => {
+      const parent = ledParent[ledgerName.toLowerCase()];
+      if (!parent) return false;
+      const top = topGroup(parent, gmap).toLowerCase();
+      return ["bank accounts", "cash-in-hand", "bank od a/c"].includes(top);
+    };
+
+    if (b.vchtype === "Contra") {
+      const nonCB = b.rows.find(r => !isCashBank(r.ledger));
+      if (nonCB) {
+        return {ok: false, lineerror: `Contra voucher requires Cash/Bank accounts on both sides. '${nonCB.ledger}' is not a Cash/Bank account.`};
+      }
+    } else if (b.vchtype === "Payment") {
+      const crRows = b.rows.filter(r => r.side === "Cr");
+      const nonCBCr = crRows.find(r => !isCashBank(r.ledger));
+      if (nonCBCr) {
+        return {ok: false, lineerror: `Payment voucher must credit a Cash/Bank account. '${nonCBCr.ledger}' is not a Cash/Bank account.`};
+      }
+    } else if (b.vchtype === "Receipt") {
+      const drRows = b.rows.filter(r => r.side === "Dr");
+      const nonCBDr = drRows.find(r => !isCashBank(r.ledger));
+      if (nonCBDr) {
+        return {ok: false, lineerror: `Receipt voucher must debit a Cash/Bank account. '${nonCBDr.ledger}' is not a Cash/Bank account.`};
+      }
+    }
+
+    // Determine smart party based on type
+    let party = b.rows[0].ledger;
+    if (b.vchtype === "Payment") {
+      const crCB = b.rows.find(r => r.side === "Cr" && isCashBank(r.ledger));
+      if (crCB) party = crCB.ledger;
+    } else if (b.vchtype === "Receipt") {
+      const drCB = b.rows.find(r => r.side === "Dr" && isCashBank(r.ledger));
+      if (drCB) party = drCB.ledger;
+    } else if (b.vchtype === "Contra") {
+      const crCB = b.rows.find(r => r.side === "Cr" && isCashBank(r.ledger));
+      if (crCB) party = crCB.ledger;
+    } else if (b.vchtype === "Sales") {
+      const drRow = b.rows.find(r => r.side === "Dr");
+      if (drRow) party = drRow.ledger;
+    } else if (b.vchtype === "Purchase") {
+      const crRow = b.rows.find(r => r.side === "Cr");
+      if (crRow) party = crRow.ledger;
+    }
+    party = norm(party);
+
     const {data, error} = await sb.from("vouchers").insert({
       date: b.date, vchtype: b.vchtype, number: b.number || "",
-      party: norm(b.rows[0].ledger), narration: b.narration || "", source: "new",
+      party, narration: b.narration || "", source: "new",
     }).select("id").single();
     if (error) return {ok: false, lineerror: error.message};
+    
     const ents = b.rows.map((r) => ({
       vid: data.id, ledger: norm(r.ledger),
       amount: r.side === "Dr" ? -Math.abs(+r.amount) : Math.abs(+r.amount),
     }));
     const {error: e2} = await sb.from("entries").insert(ents);
     if (e2) return {ok: false, lineerror: e2.message};
+    
     // make sure ledgers exist for autocomplete next time
     for (const r of b.rows) {
       await sb.from("ledgers").upsert({name: norm(r.ledger), parent: "", opening: 0},
@@ -422,10 +714,56 @@ const dal = {
         progress(`Processing ${file.name}…`);
         company = company || ft(doc, "SVCURRENTCOMPANY") || ft(doc, "COMPANYNAME");
         
-        const groups = [...doc.getElementsByTagName("GROUP")].map((g) => ({
-          name: norm(g.getAttribute("NAME") || ft(g, "NAME")),
-          parent: norm(ft(g, "PARENT")),
-        })).filter((g) => g.name);
+        const rawGroups = [...doc.getElementsByTagName("GROUP")].map((g) => {
+          const name = norm(g.getAttribute("NAME") || ft(g, "NAME"));
+          const parent = norm(ft(g, "PARENT"));
+          let basicType = ft(g, "BASICGROUPTYPE") || ft(g, "PRIMARYGROUP");
+          basicType = basicType ? basicType.trim().toLowerCase() : "";
+          return { name, parent, basicType };
+        }).filter((g) => g.name);
+
+        const gmap = {};
+        rawGroups.forEach(g => { gmap[g.name.toLowerCase()] = g; });
+
+        const guessNatureFromName = (name) => {
+          const n = name.toLowerCase();
+          if (n.includes("capital") || n.includes("loan") || n.includes("liab") || n.includes("creditor") || n.includes("tax") || n.includes("provision") || n.includes("reserve")) return "liability";
+          if (n.includes("asset") || n.includes("bank") || n.includes("cash") || n.includes("stock") || n.includes("debtor") || n.includes("deposit") || n.includes("advance")) return "asset";
+          if (n.includes("sales") || n.includes("income") || n.includes("revenue")) return "income";
+          if (n.includes("purchase") || n.includes("expense") || n.includes("cost") || n.includes("expenditure")) return "expense";
+          return "asset";
+        };
+
+        const resolveNature = (gName) => {
+          const nameLower = gName.toLowerCase();
+          if (INC_T.has(nameLower)) return "income";
+          if (EXP_T.has(nameLower)) return "expense";
+          if (LIAB_T.has(nameLower)) return "liability";
+          if (ASSET_T.has(nameLower)) return "asset";
+          
+          const g = gmap[nameLower];
+          if (!g) return guessNatureFromName(gName);
+          
+          if (g.basicType) {
+            const bt = g.basicType;
+            if (bt.includes("liab")) return "liability";
+            if (bt.includes("asset")) return "asset";
+            if (bt.includes("inc") || bt.includes("sales")) return "income";
+            if (bt.includes("exp") || bt.includes("purch")) return "expense";
+          }
+          
+          if (g.parent && g.parent.toLowerCase() !== nameLower && g.parent.toLowerCase() !== "primary") {
+            return resolveNature(g.parent);
+          }
+          
+          return guessNatureFromName(gName);
+        };
+
+        const groups = rawGroups.map(g => ({
+          name: g.name,
+          parent: g.parent,
+          nature: resolveNature(g.name)
+        }));
         
         const ledgers = [...doc.getElementsByTagName("LEDGER")].map((l) => ({
           name: norm(l.getAttribute("NAME") || ft(l, "NAME")),
@@ -434,8 +772,14 @@ const dal = {
         })).filter((l) => l.name);
         
         for (let i = 0; i < groups.length; i += 500) {
-          const {error} = await sb.from("groups").upsert(groups.slice(i, i + 500), {onConflict: "name"});
-          if (error) err(error);
+          const chunk = groups.slice(i, i + 500);
+          const {error} = await sb.from("groups").upsert(chunk, {onConflict: "name"});
+          if (error) {
+            // Fallback retry without nature in case column doesn't exist yet
+            const fallbackChunk = chunk.map(({name, parent}) => ({name, parent}));
+            const {error: e2} = await sb.from("groups").upsert(fallbackChunk, {onConflict: "name"});
+            if (e2) err(e2);
+          }
         }
         for (let i = 0; i < ledgers.length; i += 500) {
           const {error} = await sb.from("ledgers").upsert(ledgers.slice(i, i + 500), {onConflict: "name"});
@@ -450,6 +794,12 @@ const dal = {
           const d = ft(v, "DATE");
           if (!/^\d{8}$/.test(d)) continue;
           
+          // E2. Filter out optional, cancelled, and post-dated
+          const isOptional = ft(v, "ISOPTIONAL") === "Yes";
+          const isCancelled = ft(v, "ISCANCELLED") === "Yes";
+          const isPostDated = ft(v, "ISPOSTDATED") === "Yes";
+          if (isOptional || isCancelled || isPostDated) continue;
+
           const vchtype = ft(v, "VOUCHERTYPENAME") || v.getAttribute("VCHTYPE") || "Journal";
           const vno = ft(v, "VOUCHERNUMBER");
           const party = norm(ft(v, "PARTYLEDGERNAME") || ft(v, "PARTYNAME"));
@@ -460,15 +810,26 @@ const dal = {
             continue; // Skip duplicate voucher
           }
           
+          // E1. Parse all LEDGERNAME nodes recursively
           const ents = [];
-          const tags = ["ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST", "ACCOUNTINGALLOCATIONS.LIST"];
-          for (const tag of tags) {
-            for (const le of v.getElementsByTagName(tag)) {
-              const lname = norm(ft(le, "LEDGERNAME"));
-              if (lname) ents.push({ledger: lname, amount: pa(ft(le, "AMOUNT"))});
+          const ledgerNameTags = v.getElementsByTagName("LEDGERNAME");
+          for (const lNameTag of ledgerNameTags) {
+            const leNode = lNameTag.parentNode;
+            const lname = norm(lNameTag.textContent);
+            if (lname && leNode) {
+              const amtText = ft(leNode, "AMOUNT");
+              ents.push({ledger: lname, amount: pa(amtText)});
             }
           }
           if (!ents.length) continue;
+
+          // E3. Per-voucher balancing checks
+          let vsum = 0;
+          ents.forEach(e => { vsum += e.amount; });
+          if (Math.abs(vsum) > 0.05) {
+            errors.push(`Voucher #${vno || "(no number)"} on ${d} is out of balance by ${vsum.toFixed(2)}.`);
+            continue;
+          }
           
           vrows.push({
             date: d,
@@ -989,8 +1350,8 @@ const GW_ITEMS = [
   {label: "Columnar Day Book", key: "J", run: () => push(columnarDaybookScreen())},
   {label: "Ledger Vouchers", key: "L", run: () => push(ledVchScreen(""))},
   {label: "Trial Balance", key: "T", run: () => push(simpleReport("Trial Balance", "/api/columnar-trial-balance", columnarTrialTable))},
-  {label: "Balance Sheet", key: "B", run: () => push(simpleReport("Balance Sheet", "/api/balance-sheet", twoColTable))},
-  {label: "Profit & Loss A/c", key: "P", run: () => push(simpleReport("Profit & Loss A/c", "/api/pnl", twoColTable))},
+  {label: "Balance Sheet", key: "B", run: () => push(simpleReport("Balance Sheet", "/api/balance-sheet", balanceSheetTable, true))},
+  {label: "Profit & Loss A/c", key: "P", run: () => push(simpleReport("Profit & Loss A/c", "/api/pnl", pnlTable))},
   {label: "Sales Register", key: "R", run: () => push(salesRegisterScreen())},
   {label: "Purchase Register", key: "U", run: () => push(purchaseRegisterScreen())},
   {label: "Cash Flow Statement", key: "F", run: () => push(cashFlowScreen())},
@@ -1063,9 +1424,9 @@ function downloadCSV(filename, table) {
   URL.revokeObjectURL(link.href);
 }
 
-function reportBar(extraHTML = "") {
+function reportBar(extraHTML = "", hideFrom = false) {
   return `<div class="rbar">
-    <input type="date" class="rfrom" value="${S.period.from}">
+    <input type="date" class="rfrom" value="${S.period.from}" ${hideFrom ? 'style="display:none;"' : ""}>
     <input type="date" class="rto" value="${S.period.to}">
     ${extraHTML}
     <button class="btn reload">Load</button>
@@ -1515,7 +1876,8 @@ function columnarLedgerTable(rows, ledgerName, openingVal) {
     running += netAmt;
     
     const otherLedgers = v.entries.filter(e => e.ledger !== ledgerName).map(e => e.ledger);
-    const particularsText = otherLedgers.length ? otherLedgers.join(", ") : "Self";
+    const prefix = isDr ? "To " : "By ";
+    const particularsText = otherLedgers.length ? prefix + otherLedgers.join(", ") : prefix + "Self";
     
     bodyHtml += `
       <tr class="row" data-toggle="ent-${i}">
@@ -1621,20 +1983,282 @@ function trialTable(rows) {
      <td class="num cr">${money(cr)}</td></tr></table>`;
 }
 
-function columnarTrialTable(rows) {
-  if (!rows.length) return `<div class="empty">Nothing returned.</div>`;
-  let totOpenDr = 0, totOpenCr = 0, totDr = 0, totCr = 0, totCloseDr = 0, totCloseCr = 0;
+function columnarTrialTable(data) {
+  if (!data || !data.ledgers) return `<div class="empty">Nothing returned.</div>`;
+  const { groups, ledgers } = data;
   
-  rows.forEach((r) => {
-    totOpenDr += r.openDr;
-    totOpenCr += r.openCr;
-    totDr += r.debit;
-    totCr += r.credit;
-    totCloseDr += r.closeDr;
-    totCloseCr += r.closeCr;
+  const nodes = {};
+  groups.forEach(g => {
+    nodes[g.name.toLowerCase()] = {
+      name: g.name,
+      parent: g.parent || "",
+      isLedger: false,
+      children: [],
+      openDr: 0, openCr: 0,
+      debit: 0, credit: 0,
+      closeDr: 0, closeCr: 0
+    };
   });
   
-  return `
+  const roots = [];
+  const addNode = (node) => {
+    const parentName = node.parent;
+    if (parentName && parentName.toLowerCase() !== "primary") {
+      const parentNode = nodes[parentName.toLowerCase()];
+      if (parentNode) {
+        parentNode.children.push(node);
+        return;
+      }
+    }
+    roots.push(node);
+  };
+  
+  let suspenseNode = nodes["suspense a/c"];
+  if (!suspenseNode) {
+    suspenseNode = {
+      name: "Suspense A/c",
+      parent: "",
+      isLedger: false,
+      children: [],
+      openDr: 0, openCr: 0,
+      debit: 0, credit: 0,
+      closeDr: 0, closeCr: 0
+    };
+    nodes["suspense a/c"] = suspenseNode;
+    roots.push(suspenseNode);
+  }
+  
+  ledgers.forEach(l => {
+    const isPL = isPLLedger(l.name);
+    let parent = l.parent;
+    if (!parent && !isPL) {
+      parent = "Suspense A/c";
+    }
+    const node = {
+      name: l.name,
+      parent,
+      isLedger: true,
+      children: [],
+      openDr: l.openDr, openCr: l.openCr,
+      debit: l.debit, credit: l.credit,
+      closeDr: l.closeDr, closeCr: l.closeCr
+    };
+    if (isPL) {
+      roots.push(node);
+    } else {
+      addNode(node);
+    }
+  });
+  
+  groups.forEach(g => {
+    const node = nodes[g.name.toLowerCase()];
+    addNode(node);
+  });
+  
+  const sumBalances = (node) => {
+    if (node.isLedger) return {
+      openDr: node.openDr, openCr: node.openCr,
+      debit: node.debit, credit: node.credit,
+      closeDr: node.closeDr, closeCr: node.closeCr
+    };
+    
+    let openDr = 0, openCr = 0, debit = 0, credit = 0, closeDr = 0, closeCr = 0;
+    node.children.forEach(child => {
+      const childBal = sumBalances(child);
+      openDr += childBal.openDr;
+      openCr += childBal.openCr;
+      debit += childBal.debit;
+      credit += childBal.credit;
+      closeDr += childBal.closeDr;
+      closeCr += childBal.closeCr;
+    });
+    
+    const netOpen = openCr - openDr;
+    node.openDr = netOpen < 0 ? Math.abs(netOpen) : 0;
+    node.openCr = netOpen > 0 ? netOpen : 0;
+    
+    node.debit = debit;
+    node.credit = credit;
+    
+    const netClose = closeCr - closeDr;
+    node.closeDr = netClose < 0 ? Math.abs(netClose) : 0;
+    node.closeCr = netClose > 0 ? netClose : 0;
+    
+    return {
+      openDr: node.openDr, openCr: node.openCr,
+      debit: node.debit, credit: node.credit,
+      closeDr: node.closeDr, closeCr: node.closeCr
+    };
+  };
+  
+  roots.forEach(sumBalances);
+  
+  const rowsList = [];
+  const flatten = (node, depth = 0) => {
+    const hasBalance = node.openDr || node.openCr || node.debit || node.credit || node.closeDr || node.closeCr;
+    if (!hasBalance) return;
+    
+    rowsList.push({
+      name: node.name,
+      isLedger: node.isLedger,
+      parent: node.parent,
+      depth,
+      openDr: node.openDr, openCr: node.openCr,
+      debit: node.debit, credit: node.credit,
+      closeDr: node.closeDr, closeCr: node.closeCr
+    });
+    
+    node.children.sort((a, b) => {
+      if (a.isLedger !== b.isLedger) return a.isLedger ? 1 : -1;
+      return a.name.localeCompare(b.name);
+    });
+    node.children.forEach(child => flatten(child, depth + 1));
+  };
+  
+  roots.sort((a,b) => a.name.localeCompare(b.name)).forEach(root => flatten(root, 0));
+  
+  let totOpenDr = 0, totOpenCr = 0, totDr = 0, totCr = 0, totCloseDr = 0, totCloseCr = 0;
+  ledgers.forEach(l => {
+    totOpenDr += l.openDr;
+    totOpenCr += l.openCr;
+    totDr += l.debit;
+    totCr += l.credit;
+    totCloseDr += l.closeDr;
+    totCloseCr += l.closeCr;
+  });
+  
+  const openDiff = totOpenCr - totOpenDr;
+  const closeDiff = totCloseCr - totCloseDr;
+  
+  if (Math.abs(openDiff) > 0.05) {
+    if (openDiff < 0) {
+      totOpenCr += Math.abs(openDiff);
+    } else {
+      totOpenDr += Math.abs(openDiff);
+    }
+  }
+  if (Math.abs(closeDiff) > 0.05) {
+    if (closeDiff < 0) {
+      totCloseCr += Math.abs(closeDiff);
+    } else {
+      totCloseDr += Math.abs(closeDiff);
+    }
+  }
+  
+  let idCounter = 0;
+  const trsHtml = rowsList.map(r => {
+    const isGroup = !r.isLedger;
+    const parentClass = r.parent ? `child-of-${esc(r.parent.toLowerCase().replaceAll(" ", "-"))}` : "";
+    const nodeClass = isGroup ? `group-${esc(r.name.toLowerCase().replaceAll(" ", "-"))}` : "";
+    const rowId = `tb-row-${idCounter++}`;
+    
+    let clickAttr = "";
+    if (r.isLedger) {
+      clickAttr = `data-openledger="${esc(r.name)}"`;
+    } else {
+      clickAttr = `data-opengroup="${esc(r.name)}"`;
+    }
+    
+    const toggleIcon = isGroup ? `<span class="toggle-node" style="cursor: pointer; margin-right: 6px; user-select: none;">▼</span>` : `<span style="display:inline-block; width:14px; margin-right: 6px;"></span>`;
+    
+    return `
+      <tr class="row ${parentClass} ${nodeClass}" id="${rowId}" ${clickAttr} data-depth="${r.depth}" data-name="${esc(r.name.toLowerCase())}" data-collapsed="false" style="transition: all var(--transition-fast);">
+        <td style="padding-left: ${r.depth * 16 + 8}px;">
+          ${toggleIcon}${esc(r.name)}
+        </td>
+        <td class="num dr">${r.openDr ? money(r.openDr) : ""}</td>
+        <td class="num cr">${r.openCr ? money(r.openCr) : ""}</td>
+        <td class="num dr">${r.debit ? money(r.debit) : ""}</td>
+        <td class="num cr">${r.credit ? money(r.credit) : ""}</td>
+        <td class="num dr">${r.closeDr ? money(r.closeDr) : ""}</td>
+        <td class="num cr">${r.closeCr ? money(r.closeCr) : ""}</td>
+      </tr>
+    `;
+  }).join("");
+  
+  if (!window.trialBalanceWired) {
+    window.trialBalanceWired = true;
+    document.addEventListener("click", (e) => {
+      const toggle = e.target.closest(".toggle-node");
+      if (toggle) {
+        const row = toggle.closest("tr");
+        if (row) {
+          e.stopPropagation();
+          const name = row.dataset.name;
+          const isCollapsed = row.dataset.collapsed === "true";
+          row.dataset.collapsed = isCollapsed ? "false" : "true";
+          toggle.textContent = isCollapsed ? "▼" : "▶";
+          
+          const tbody = row.closest("tbody");
+          const allRows = Array.from(tbody.querySelectorAll("tr.row"));
+          
+          const setChildVisibility = (parentName, visible) => {
+            allRows.forEach(r => {
+              if (r.classList.contains(`child-of-${parentName.replaceAll(" ", "-")}`)) {
+                r.style.display = visible ? "" : "none";
+                if (!visible) {
+                  r.dataset.collapsed = "true";
+                  const childToggle = r.querySelector(".toggle-node");
+                  if (childToggle) childToggle.textContent = "▶";
+                  setChildVisibility(r.dataset.name, false);
+                }
+              }
+            });
+          };
+          setChildVisibility(name, isCollapsed);
+        }
+      }
+    });
+  }
+
+  const controlsHtml = `
+    <div class="rbar" style="margin-bottom: 12px; gap: 8px;">
+      <button class="btn outline" onclick="(() => {
+        document.querySelectorAll('tr.row').forEach(r => { r.style.display = ''; r.dataset.collapsed = 'false'; const t = r.querySelector('.toggle-node'); if (t) t.textContent = '▼'; });
+      })()">Expand All</button>
+      <button class="btn outline" onclick="(() => {
+        document.querySelectorAll('tr.row').forEach(r => {
+          const depth = parseInt(r.dataset.depth || '0');
+          if (depth > 0) { r.style.display = 'none'; }
+          r.dataset.collapsed = 'true';
+          const t = r.querySelector('.toggle-node');
+          if (t) t.textContent = '▶';
+        });
+      })()">Collapse All</button>
+    </div>
+  `;
+  
+  let diffOpenRowHtml = "";
+  let diffCloseRowHtml = "";
+  
+  if (Math.abs(openDiff) > 0.05) {
+    diffOpenRowHtml = `
+      <tr style="color: var(--accent); font-style: italic;">
+        <td style="padding-left: 8px;">Difference in Opening Balances</td>
+        <td class="num dr">${openDiff < 0 ? money(Math.abs(openDiff)) : ""}</td>
+        <td class="num cr">${openDiff > 0 ? money(openDiff) : ""}</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+      </tr>
+    `;
+  }
+  if (Math.abs(closeDiff) > 0.05) {
+    diffCloseRowHtml = `
+      <tr style="color: var(--accent); font-style: italic;">
+        <td style="padding-left: 8px;">Difference in Closing Balances</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="num dr">${closeDiff < 0 ? money(Math.abs(closeDiff)) : ""}</td>
+        <td class="num cr">${closeDiff > 0 ? money(closeDiff) : ""}</td>
+      </tr>
+    `;
+  }
+  
+  return controlsHtml + `
     <table>
       <thead>
         <tr>
@@ -1653,17 +2277,9 @@ function columnarTrialTable(rows) {
         </tr>
       </thead>
       <tbody>
-        ${rows.map((r) => `
-          <tr class="row" data-opengroup="${esc(r.name)}">
-            <td>${esc(r.name)}</td>
-            <td class="num dr">${r.openDr ? money(r.openDr) : ""}</td>
-            <td class="num cr">${r.openCr ? money(r.openCr) : ""}</td>
-            <td class="num dr">${r.debit ? money(r.debit) : ""}</td>
-            <td class="num cr">${r.credit ? money(r.credit) : ""}</td>
-            <td class="num dr">${r.closeDr ? money(r.closeDr) : ""}</td>
-            <td class="num cr">${r.closeCr ? money(r.closeCr) : ""}</td>
-          </tr>
-        `).join("")}
+        ${trsHtml}
+        ${diffOpenRowHtml}
+        ${diffCloseRowHtml}
         <tr class="total">
           <td>Total</td>
           <td class="num dr">${totOpenDr ? money(totOpenDr) : ""}</td>
@@ -2007,6 +2623,160 @@ function renderColumnarDaybookTable(vouchers) {
   `;
 }
 
+function balanceSheetTable(data) {
+  if (!data) return `<div class="empty">Nothing returned.</div>`;
+  const renderRows = (list) => {
+    return list.map(r => {
+      const isPnlLedger = isPLLedger(r.name);
+      const isDiff = r.name.toLowerCase() === "difference in opening balances";
+      let clickAttr = "";
+      if (isPnlLedger) {
+        clickAttr = `data-openledger="${esc(r.name)}"`;
+      } else if (!isDiff) {
+        clickAttr = `data-opengroup="${esc(r.name)}"`;
+      }
+      const amtStr = r.amount ? money(r.amount) + " " + r.side : "";
+      return `<tr class="row" ${clickAttr}>
+        <td>${esc(r.name)}</td>
+        <td class="num ${r.side === "Dr" ? "dr" : "cr"}">${amtStr}</td>
+      </tr>`;
+    }).join("");
+  };
+  return `
+    <div class="bs-container" style="display: flex; gap: 20px; width: 100%; flex-wrap: wrap;">
+      <div class="bs-column" style="flex: 1; min-width: 300px;">
+        <table>
+          <thead>
+            <tr style="background: var(--paper-alt); font-weight: 600;">
+              <th>Liabilities</th>
+              <th style="text-align: right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRows(data.liabilities)}
+            <tr style="font-weight: 600; background: var(--paper-alt); border-top: 2px solid var(--line);">
+              <td>Total</td>
+              <td class="num cr" style="text-align: right">${money(data.liabTotal)} Cr</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="bs-column" style="flex: 1; min-width: 300px;">
+        <table>
+          <thead>
+            <tr style="background: var(--paper-alt); font-weight: 600;">
+              <th>Assets</th>
+              <th style="text-align: right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRows(data.assets)}
+            <tr style="font-weight: 600; background: var(--paper-alt); border-top: 2px solid var(--line);">
+              <td>Total</td>
+              <td class="num dr" style="text-align: right">${money(data.assetTotal)} Dr</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function pnlTable(data) {
+  if (!data) return `<div class="empty">Nothing returned.</div>`;
+  const renderRows = (list) => {
+    return list.map(r => {
+      const isGpGl = r.name.startsWith("Gross Profit") || r.name.startsWith("Gross Loss") || r.name.startsWith("Net Profit") || r.name.startsWith("Net Loss") || r.name === "Opening Stock" || r.name === "Closing Stock";
+      let clickAttr = "";
+      if (!isGpGl) {
+        clickAttr = `data-opengroup="${esc(r.name)}"`;
+      }
+      const amtStr = r.amount ? money(r.amount) + " " + r.side : "";
+      return `<tr class="row" ${clickAttr}>
+        <td>${esc(r.name)}</td>
+        <td class="num ${r.side === "Dr" ? "dr" : "cr"}">${amtStr}</td>
+      </tr>`;
+    }).join("");
+  };
+  return `
+    <div style="font-weight: 600; margin-bottom: 8px; font-size: 14px; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 4px;">Trading Account</div>
+    <div class="bs-container" style="display: flex; gap: 20px; width: 100%; flex-wrap: wrap; margin-bottom: 24px;">
+      <div class="bs-column" style="flex: 1; min-width: 300px;">
+        <table>
+          <thead>
+            <tr style="background: var(--paper-alt); font-weight: 600;">
+              <th>Expenses</th>
+              <th style="text-align: right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRows(data.tradingLeft)}
+            <tr style="font-weight: 600; background: var(--paper-alt); border-top: 2px solid var(--line);">
+              <td>Total</td>
+              <td class="num dr" style="text-align: right">${money(data.tradingTotal)} Dr</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="bs-column" style="flex: 1; min-width: 300px;">
+        <table>
+          <thead>
+            <tr style="background: var(--paper-alt); font-weight: 600;">
+              <th>Incomes</th>
+              <th style="text-align: right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRows(data.tradingRight)}
+            <tr style="font-weight: 600; background: var(--paper-alt); border-top: 2px solid var(--line);">
+              <td>Total</td>
+              <td class="num cr" style="text-align: right">${money(data.tradingTotal)} Cr</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    
+    <div style="font-weight: 600; margin-bottom: 8px; font-size: 14px; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 4px;">Profit & Loss Account</div>
+    <div class="bs-container" style="display: flex; gap: 20px; width: 100%; flex-wrap: wrap;">
+      <div class="bs-column" style="flex: 1; min-width: 300px;">
+        <table>
+          <thead>
+            <tr style="background: var(--paper-alt); font-weight: 600;">
+              <th>Expenses</th>
+              <th style="text-align: right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRows(data.pnlLeft)}
+            <tr style="font-weight: 600; background: var(--paper-alt); border-top: 2px solid var(--line);">
+              <td>Total</td>
+              <td class="num dr" style="text-align: right">${money(data.pnlTotal)} Dr</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="bs-column" style="flex: 1; min-width: 300px;">
+        <table>
+          <thead>
+            <tr style="background: var(--paper-alt); font-weight: 600;">
+              <th>Incomes</th>
+              <th style="text-align: right">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderRows(data.pnlRight)}
+            <tr style="font-weight: 600; background: var(--paper-alt); border-top: 2px solid var(--line);">
+              <td>Total</td>
+              <td class="num cr" style="text-align: right">${money(data.pnlTotal)} Cr</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
 function twoColTable(rows) {
   if (!rows.length) return `<div class="empty">Nothing returned.</div>`;
   return `<table><tr><th>Particulars</th><th style="text-align:right">Amount</th></tr>` +
@@ -2015,7 +2785,7 @@ function twoColTable(rows) {
       if (isHeader) {
         return `<tr style="font-weight:600; background:var(--paper-alt);"><td colspan="2">${esc(r.name)}</td></tr>`;
       }
-      const isPnlLedger = r.name.toLowerCase() === "profit & loss a/c";
+      const isPnlLedger = isPLLedger(r.name);
       const isNetProfitLoss = r.name.toLowerCase() === "net profit" || r.name.toLowerCase() === "net loss";
       let clickAttr = "";
       if (isPnlLedger) {
@@ -2029,22 +2799,13 @@ function twoColTable(rows) {
     }).join("") + `</table>`;
 }
 
-function stockTable(rows) {
-  if (!rows.length) return `<div class="empty">No stock items (or inventory not in use).</div>`;
-  return `<table><tr><th>Item</th><th style="text-align:right">Quantity</th>
-    <th style="text-align:right">Rate</th><th style="text-align:right">Value</th></tr>` +
-    rows.map((r) => `<tr><td>${esc(r.name)}</td><td class="num">${esc(r.qty)}</td>
-      <td class="num">${esc(r.rate)}</td><td class="num">${esc(r.amount)}</td></tr>`).join("") +
-    `</table>`;
-}
-
-function simpleReport(title, url, tableFn) {
+function simpleReport(title, url, tableFn, hideFrom = false) {
   const scr = {
     title,
     render(el) {
       const d = document.createElement("div");
       d.className = "report";
-      d.innerHTML = reportBar();
+      d.innerHTML = reportBar("", hideFrom);
       el.appendChild(d);
       scr.refresh = () => wireReport(d, async () =>
         tableFn(await api(`${url}?from=${ymd(S.period.from)}&to=${ymd(S.period.to)}`)));
@@ -2542,6 +3303,10 @@ async function loadMasters(flash) {
   try {
     const [led, grp] = await Promise.all([api("/api/ledgers"), api("/api/groups")]);
     S.ledgers = led; S.groups = grp;
+    S.groupNatures = {};
+    grp.forEach(g => {
+      S.groupNatures[g.name.toLowerCase()] = g.nature || "";
+    });
     const dl = $("ledDL");
     if (dl) dl.innerHTML = led.map(l => `<option value="${esc(l.name)}">`).join("");
     if (flash) flashTitle(`✓ Reloaded ${led.length} ledgers from database`);

@@ -11,7 +11,8 @@ drop view  if exists ledger_balances;
 create table groups (
   id     bigint generated always as identity primary key,
   name   text not null unique,
-  parent text not null default ''
+  parent text not null default '',
+  nature text not null default ''
 );
 
 create table ledgers (
