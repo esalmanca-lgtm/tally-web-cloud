@@ -2989,7 +2989,27 @@ function columnarTrialTable(data) {
 
 function renderRegisterTable(vouchers, type) {
   if (!vouchers.length) return `<div class="empty">No entries in this period.</div>`;
-  const isGstLedger = (name) => /(gst|tax|cgst|sgst|igst|vat|cess|duty|duties)/i.test(name);
+  
+  const ledMap = {};
+  if (window.S && window.S.ledgers) {
+    window.S.ledgers.forEach(l => ledMap[l.name] = l.parent);
+  }
+  const gmap = {};
+  if (window.S && window.S.groups) {
+    window.S.groups.forEach(g => {
+      gmap[g.name.toLowerCase()] = { parent: g.parent || "", nature: g.nature || "" };
+    });
+  }
+  
+  const isGstLedger = (name) => {
+    if (ledMap[name]) {
+      const top = topGroup(ledMap[name], gmap);
+      if (top.toLowerCase() === "duties & taxes") return true;
+      const nat = natureOfGroup(top, gmap);
+      if (nat === "income" || nat === "expense") return false;
+    }
+    return /(gst|tax|cgst|sgst|igst|vat|cess|duty|duties)/i.test(name);
+  };
   
   let totalTaxable = 0;
   let totalGst = 0;
