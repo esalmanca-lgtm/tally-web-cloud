@@ -326,14 +326,37 @@ const dal = {
 
   async getLedgerClosing(ledger, date) {
     const { data: ledData, error: ledErr } = await sb.from("ledgers")
-      .select("opening")
+      .select("opening, parent")
       .eq("name", ledger)
       .maybeSingle();
     if (ledErr || !ledData) return 0;
     
     let query = sb.from("entries").select("amount");
     if (date) {
-      query = sb.from("entries").select("amount,vouchers!inner(date)").lte("vouchers.date", date);
+      const gmap = await getGroupNatureMap();
+      const top = ledData.parent ? topGroup(ledData.parent, gmap) : "Suspense A/c";
+      const nat = natureOfGroup(top, gmap);
+      
+      if ((nat === "income" || nat === "expense") && date.length === 8) {
+        const yr = parseInt(date.slice(0, 4));
+        const mo = parseInt(date.slice(4, 6));
+        const dy = parseInt(date.slice(6, 8));
+        const nextDay = new Date(yr, mo - 1, dy + 1);
+        const nextY = nextDay.getFullYear();
+        const nextM = nextDay.getMonth() + 1;
+        const fyStartYear = nextM >= 4 ? nextY : nextY - 1;
+        const fyStartDateStr = `${fyStartYear}0401`;
+
+        if (date < fyStartDateStr) {
+          return +ledData.opening || 0;
+        } else {
+          query = sb.from("entries").select("amount,vouchers!inner(date)")
+            .gte("vouchers.date", fyStartDateStr)
+            .lte("vouchers.date", date);
+        }
+      } else {
+        query = sb.from("entries").select("amount,vouchers!inner(date)").lte("vouchers.date", date);
+      }
     }
     const ents = await fetchAll(() => query.eq("ledger", ledger));
     const sum = ents.reduce((acc, e) => acc + (+e.amount || 0), 0);
