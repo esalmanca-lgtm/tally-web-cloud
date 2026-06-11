@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tally Web</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">TALLY<span>WEB</span></div>
+    <div id="companyName" class="company">—</div>
+    <div class="period" id="periodLabel" title="Alt+F2 to change period">—</div>
+    <div id="themeToggle" class="theme-toggle" title="Toggle theme">🌓 <span id="themeText">Theme</span></div>
+    <div id="conn" class="conn"><span class="dot"></span><span id="connText">…</span></div>
+  </header>
+
+  <div id="layout">
+    <div id="screenWrap">
+      <div id="screenTitle" class="screen-title">Gateway of Tally</div>
+      <div id="screen"></div>
+    </div>
+
+    <aside id="btnbar">
+      <button data-act="date"   title="Change date"><b>F2</b><span>Date</span></button>
+      <button data-act="period" title="Change period"><b>Alt+F2</b><span>Period</span></button>
+      <div class="sep"></div>
+      <button data-act="vch:Contra"><b>F4</b><span>Contra</span></button>
+      <button data-act="vch:Payment"><b>F5</b><span>Payment</span></button>
+      <button data-act="vch:Receipt"><b>F6</b><span>Receipt</span></button>
+      <button data-act="vch:Journal"><b>F7</b><span>Journal</span></button>
+      <button data-act="vch:Sales"><b>F8</b><span>Sales</span></button>
+      <button data-act="vch:Purchase"><b>F9</b><span>Purchase</span></button>
+      <div class="sep"></div>
+      <button data-act="dashboard"><b>F10</b><span>Dashboard</span></button>
+      <button data-act="refresh"><b>F11</b><span>Reload data</span></button>
+      <button data-act="settings"><b>F12</b><span>Account</span></button>
+    </aside>
+  </div>
+
+  <footer id="hintbar">
+    <span><b>↑↓</b> move</span><span><b>Enter</b> select</span>
+    <span><b>Esc</b> back / quit screen</span><span><b>Ctrl+A</b> accept voucher</span>
+    <span><b>F4–F9</b> voucher types</span>
+  </footer>
+
+  <div id="modal" class="hidden">
+    <div id="modalBox"></div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
