@@ -61,3 +61,11 @@ select l.name, l.parent, l.opening,
 from ledgers l;
 
 grant select on ledger_balances to anon;
+
+-- Config table for persistent settings (e.g. company name)
+create table if not exists config (
+  key   text primary key,
+  value text not null
+);
+
+grant all on config to anon;

@@ -3,8 +3,9 @@
 
 /* ------------------------------------------------------------ helpers --- */
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
-  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"\']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const norm = (s) => String(s ?? "").replaceAll("\xa0", " ").replace(/\s+/g, " ").trim();
 const money = (n) => Number(n || 0).toLocaleString("en-IN", {minimumFractionDigits: 2});
 const ymd = (iso) => (iso || "").replaceAll("-", "");
 const tdate = (iso) => { // 2026-06-11 -> 11-Jun-26
@@ -77,9 +78,20 @@ const dal = {
       if (error) err(error);
       return count || 0;
     };
+    const cntBlankParents = async () => {
+      const {count, error} = await sb.from("ledgers")
+        .select("name", {count: "exact", head: true})
+        .eq("parent", "")
+        .neq("name", "Profit & Loss A/c");
+      if (error) return 0;
+      return count || 0;
+    };
+    const [ledgers, vouchers, groups, new_vouchers, blank_parents] = await Promise.all([
+      cnt("ledgers"), cnt("vouchers"), cnt("groups"), cnt("vouchers", "new"),
+      cntBlankParents()
+    ]);
     return {
-      ledgers: await cnt("ledgers"), vouchers: await cnt("vouchers"),
-      groups: await cnt("groups"), new_vouchers: await cnt("vouchers", "new"),
+      ledgers, vouchers, groups, new_vouchers, blank_parents
     };
   },
 
@@ -172,12 +184,15 @@ const dal = {
 
   async trialBalance(dto) {
     const cl = await dal.closings(dto);
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    const gmap = {};
+    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
     const agg = {};
     for (const [name, v] of Object.entries(cl)) {
-      const key = v.parent || "(no group)";
-      agg[key] = agg[key] || [0, 0];
-      if (v.closing < -0.004) agg[key][0] += -v.closing;
-      else if (v.closing > 0.004) agg[key][1] += v.closing;
+      const top = v.parent ? topGroup(v.parent, gmap) : (name.toLowerCase() === "profit & loss a/c" ? "Profit & Loss A/c" : "Suspense A/c");
+      agg[top] = agg[top] || [0, 0];
+      if (v.closing < -0.004) agg[top][0] += -v.closing;
+      else if (v.closing > 0.004) agg[top][1] += v.closing;
     }
     return Object.keys(agg).sort().filter((k) => agg[k][0] || agg[k][1])
       .map((k) => ({name: k, debit: Math.round(agg[k][0] * 100) / 100,
@@ -270,8 +285,33 @@ const dal = {
             {name: "— ASSETS —", amount: 0, side: ""}, ...asset];
   },
 
-  async pnl(dto) {
-    const byTop = await dal.naturedTotals(dto);
+  async periodNaturedTotals(dfrom, dto) {
+    const clTo = await dal.closings(dto);
+    const prevDate = new Date(new Date(dfrom) - 86400000).toISOString().slice(0, 10);
+    const clFrom = await dal.closings(ymd(prevDate));
+    
+    const grows = await fetchAll(() => sb.from("groups").select("name,parent"));
+    const gmap = {};
+    grows.forEach((g) => { gmap[g.name.toLowerCase()] = g.parent || ""; });
+    
+    const byTop = {};
+    for (const [name, v] of Object.entries(clTo)) {
+      const top = v.parent ? topGroup(v.parent, gmap) : "Suspense A/c";
+      const nat = natureOf(top);
+      let val = v.closing;
+      if (nat === "income" || nat === "expense") {
+        const startVal = clFrom[name] ? clFrom[name].closing : 0;
+        val = val - startVal;
+      }
+      if (Math.abs(val) < 0.005) continue;
+      if (name.toLowerCase() === "profit & loss a/c") continue;
+      byTop[top] = (byTop[top] || 0) + val;
+    }
+    return byTop;
+  },
+
+  async pnl(dfrom, dto) {
+    const byTop = await dal.periodNaturedTotals(dfrom, dto);
     const inc = [], exp = [];
     let net = 0;
     for (const top of Object.keys(byTop).sort()) {
@@ -288,7 +328,7 @@ const dal = {
     let opening = Math.abs(parseFloat(b.opening) || 0);
     if ((b.openingSide || "Dr") === "Dr") opening = -opening;
     const {error} = await sb.from("ledgers")
-      .insert({name: b.name, parent: b.parent, opening});
+      .insert({name: norm(b.name), parent: norm(b.parent), opening});
     if (error) return {ok: false, lineerror: error.message};
     return {ok: true, created: 1};
   },
@@ -300,18 +340,18 @@ const dal = {
       return {ok: false, lineerror: `Voucher not balanced (Dr ${dr.toFixed(2)} / Cr ${cr.toFixed(2)})`};
     const {data, error} = await sb.from("vouchers").insert({
       date: b.date, vchtype: b.vchtype, number: b.number || "",
-      party: b.rows[0].ledger, narration: b.narration || "", source: "new",
+      party: norm(b.rows[0].ledger), narration: b.narration || "", source: "new",
     }).select("id").single();
     if (error) return {ok: false, lineerror: error.message};
     const ents = b.rows.map((r) => ({
-      vid: data.id, ledger: r.ledger,
+      vid: data.id, ledger: norm(r.ledger),
       amount: r.side === "Dr" ? -Math.abs(+r.amount) : Math.abs(+r.amount),
     }));
     const {error: e2} = await sb.from("entries").insert(ents);
     if (e2) return {ok: false, lineerror: e2.message};
     // make sure ledgers exist for autocomplete next time
     for (const r of b.rows) {
-      await sb.from("ledgers").upsert({name: r.ledger, parent: "", opening: 0},
+      await sb.from("ledgers").upsert({name: norm(r.ledger), parent: "", opening: 0},
         {onConflict: "name", ignoreDuplicates: true});
     }
     return {ok: true, created: 1};
@@ -334,79 +374,130 @@ const dal = {
 
   /* -------- client-side Tally XML import -------- */
   async importFiles(files, replace, progress) {
-    if (replace) await dal.resetData();
+    const parsedFiles = [];
     const ft = (el, tag) => {
       const n = el.getElementsByTagName(tag)[0];
       return n && n.textContent ? n.textContent : "";
     };
+    
+    // 1. Read and validate all files first
+    for (const f of files) {
+      progress(`Reading and validating ${f.name}…`);
+      let text = await f.text();
+      text = text.replace(/&#(?:[0-8]|1[124-9]|2[0-9]|3[01]);/g, "")
+                 .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
+      const doc = new DOMParser().parseFromString(text, "text/xml");
+      if (doc.getElementsByTagName("parsererror").length) {
+        throw new Error(`${f.name} is not a valid XML file.`);
+      }
+      parsedFiles.push({ file: f, doc });
+    }
+    
+    // 2. Perform reset if requested
+    if (replace) {
+      progress("Clearing database…");
+      await dal.resetData();
+    }
+    
     let tg = 0, tl = 0, tv = 0, company = "";
     const errors = [];
-    for (const f of files) {
+    
+    // 3. Fetch existing keys if merging
+    let existingKeys = new Set();
+    if (!replace) {
       try {
-        progress(`Reading ${f.name}…`);
-        let text = await f.text();
-        text = text.replace(/&#(?:[0-8]|1[124-9]|2[0-9]|3[01]);/g, "")
-                   .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
-        const doc = new DOMParser().parseFromString(text, "text/xml");
-        if (doc.getElementsByTagName("parsererror").length)
-          throw new Error("not valid XML");
+        progress("Checking existing data to prevent duplicates…");
+        const existing = await fetchAll(() => sb.from("vouchers").select("date,vchtype,number,party,narration"));
+        existing.forEach(v => {
+          existingKeys.add(`${v.date}|${v.vchtype}|${v.number || ""}|${v.party || ""}|${v.narration || ""}`);
+        });
+      } catch (e) {
+        // config table/database might be empty
+      }
+    }
+    
+    // 4. Process the validated documents
+    for (const { file, doc } of parsedFiles) {
+      try {
+        progress(`Processing ${file.name}…`);
         company = company || ft(doc, "SVCURRENTCOMPANY") || ft(doc, "COMPANYNAME");
-
+        
         const groups = [...doc.getElementsByTagName("GROUP")].map((g) => ({
-          name: g.getAttribute("NAME") || ft(g, "NAME"),
-          parent: ft(g, "PARENT"),
+          name: norm(g.getAttribute("NAME") || ft(g, "NAME")),
+          parent: norm(ft(g, "PARENT")),
         })).filter((g) => g.name);
+        
         const ledgers = [...doc.getElementsByTagName("LEDGER")].map((l) => ({
-          name: l.getAttribute("NAME") || ft(l, "NAME"),
-          parent: ft(l, "PARENT"),
+          name: norm(l.getAttribute("NAME") || ft(l, "NAME")),
+          parent: norm(ft(l, "PARENT")),
           opening: pa(ft(l, "OPENINGBALANCE")),
         })).filter((l) => l.name);
+        
         for (let i = 0; i < groups.length; i += 500) {
-          const {error} = await sb.from("groups").upsert(groups.slice(i, i + 500),
-            {onConflict: "name"});
+          const {error} = await sb.from("groups").upsert(groups.slice(i, i + 500), {onConflict: "name"});
           if (error) err(error);
         }
         for (let i = 0; i < ledgers.length; i += 500) {
-          const {error} = await sb.from("ledgers").upsert(ledgers.slice(i, i + 500),
-            {onConflict: "name"});
+          const {error} = await sb.from("ledgers").upsert(ledgers.slice(i, i + 500), {onConflict: "name"});
           if (error) err(error);
         }
         tg += groups.length; tl += ledgers.length;
-
+        
         const vEls = [...doc.getElementsByTagName("VOUCHER")];
         const vrows = [], erows = [];
+        
         for (const v of vEls) {
           const d = ft(v, "DATE");
           if (!/^\d{8}$/.test(d)) continue;
+          
+          const vchtype = ft(v, "VOUCHERTYPENAME") || v.getAttribute("VCHTYPE") || "Journal";
+          const vno = ft(v, "VOUCHERNUMBER");
+          const party = norm(ft(v, "PARTYLEDGERNAME") || ft(v, "PARTYNAME"));
+          const narration = ft(v, "NARRATION");
+          
+          const fingerprint = `${d}|${vchtype}|${vno || ""}|${party || ""}|${narration || ""}`;
+          if (!replace && existingKeys.has(fingerprint)) {
+            continue; // Skip duplicate voucher
+          }
+          
           const ents = [];
-          for (const tag of ["ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST"]) {
+          const tags = ["ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST", "ACCOUNTINGALLOCATIONS.LIST"];
+          for (const tag of tags) {
             for (const le of v.getElementsByTagName(tag)) {
-              const lname = ft(le, "LEDGERNAME");
+              const lname = norm(ft(le, "LEDGERNAME"));
               if (lname) ents.push({ledger: lname, amount: pa(ft(le, "AMOUNT"))});
             }
           }
           if (!ents.length) continue;
-          vrows.push({date: d,
-            vchtype: ft(v, "VOUCHERTYPENAME") || v.getAttribute("VCHTYPE") || "Journal",
-            number: ft(v, "VOUCHERNUMBER"),
-            party: ft(v, "PARTYLEDGERNAME") || ft(v, "PARTYNAME"),
-            narration: ft(v, "NARRATION"), source: "import"});
+          
+          vrows.push({
+            date: d,
+            vchtype,
+            number: vno,
+            party,
+            narration,
+            source: "import"
+          });
           erows.push(ents);
         }
+        
         for (let i = 0; i < vrows.length; i += 200) {
           progress(`Saving vouchers ${Math.min(i + 200, vrows.length)} / ${vrows.length}…`);
           const chunk = vrows.slice(i, i + 200);
           const {data, error} = await sb.from("vouchers").insert(chunk).select("id");
           if (error) err(error);
+          
           const ents = [];
           data.forEach((row, j) =>
             erows[i + j].forEach((e) => ents.push({vid: row.id, ...e})));
+          
           for (let k = 0; k < ents.length; k += 500) {
             const {error: e2} = await sb.from("entries").insert(ents.slice(k, k + 500));
             if (e2) err(e2);
           }
         }
         tv += vrows.length;
+        
         // ledgers referenced only in vouchers
         const known = new Set(ledgers.map((l) => l.name));
         const missing = [...new Set(erows.flat().map((e) => e.ledger))]
@@ -415,9 +506,19 @@ const dal = {
           await sb.from("ledgers").upsert(missing.slice(i, i + 500),
             {onConflict: "name", ignoreDuplicates: true});
         }
-      } catch (e) { errors.push(`${f.name}: ${e.message}`); }
+      } catch (e) {
+        errors.push(`${file.name}: ${e.message}`);
+      }
     }
-    if (company) localStorage.setItem("tw_company", company);
+    
+    if (company) {
+      localStorage.setItem("tw_company", company);
+      try {
+        await sb.from("config").upsert({key: "company_name", value: company});
+      } catch (e) {
+        // config table doesn't exist yet
+      }
+    }
     return {ok: !errors.length || (tg + tl + tv) > 0,
             groups: tg, ledgers: tl, vouchers: tv, errors};
   },
@@ -448,6 +549,14 @@ const dal = {
       `<TALLYMESSAGE xmlns:UDF="TallyUDF">${msgs}</TALLYMESSAGE>` +
       `</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
   },
+
+  async markNewVouchersExported() {
+    const {error} = await sb.from("vouchers")
+      .update({source: "import"})
+      .eq("source", "new");
+    if (error) return {ok: false, lineerror: error.message};
+    return {ok: true};
+  },
 };
 
 /* api() shim: routes the existing UI's calls to the Supabase data layer */
@@ -455,6 +564,14 @@ async function api(path, opts) {
   const [p, qs] = path.split("?");
   const q = Object.fromEntries(new URLSearchParams(qs || ""));
   const body = opts && opts.body ? JSON.parse(opts.body) : null;
+
+  // PIN Gate
+  const pin = (window.TALLY_CONFIG.APP_PIN || "").toString().trim();
+  const allowed = ["/api/config", "/api/ping", "/api/data-status"];
+  if (pin && sessionStorage.getItem("tw_auth") !== "1" && !allowed.includes(p)) {
+    throw new Error("Unauthorized: Application is locked");
+  }
+
   switch (p) {
     case "/api/config": return {mode: "cloud"};
     case "/api/ping": return {ok: true, message: "cloud"};
@@ -470,11 +587,12 @@ async function api(path, opts) {
     case "/api/sales-register": return dal.salesRegister(q.from, q.to);
     case "/api/purchase-register": return dal.purchaseRegister(q.from, q.to);
     case "/api/balance-sheet": return dal.balanceSheet(q.to);
-    case "/api/pnl": return dal.pnl(q.to);
+    case "/api/pnl": return dal.pnl(q.from, q.to);
     case "/api/stock-summary": return [];
     case "/api/ledger": return dal.createLedger(body);
     case "/api/voucher": return dal.createVoucher(body);
     case "/api/voucher/delete": return dal.deleteVoucher(body.remoteid);
+    case "/api/voucher/mark-exported": return dal.markNewVouchersExported();
     case "/api/reset-data": return dal.resetData();
     default: throw new Error("Unknown route " + p);
   }
@@ -487,8 +605,8 @@ const S = {
   stack: [],
 };
 (function initDates() {
-  const t = new Date();
-  const fyStartYear = t.getMonth() >= 3 ? t.getFullYear() : t.getFullYear() - 1;
+  const t = new Date(Date.now() + 19800000); // Shift UTC to Indian Standard Time (+5:30)
+  const fyStartYear = t.getUTCMonth() >= 3 ? t.getUTCFullYear() : t.getUTCFullYear() - 1;
   const iso = (d) => d.toISOString().slice(0, 10);
   S.period.from = `${fyStartYear}-04-01`;
   S.period.to = iso(t);
@@ -529,7 +647,13 @@ function closeModal() {
   modalKeyHandler = null;
 }
 $("modal").addEventListener("mousedown", (e) => {
-  if (e.target.id === "modal") closeModal();
+  if (e.target.id === "modal") {
+    const pin = (window.TALLY_CONFIG.APP_PIN || "").toString().trim();
+    if (pin && sessionStorage.getItem("tw_auth") !== "1") {
+      return; // prevent click-outside bypass when locked
+    }
+    closeModal();
+  }
 });
 
 /* --------------------------------------------------------------- theme --- */
@@ -871,7 +995,6 @@ const GW_ITEMS = [
   {label: "Purchase Register", key: "U", run: () => push(purchaseRegisterScreen())},
   {label: "Cash Flow Statement", key: "F", run: () => push(cashFlowScreen())},
   {label: "Outstanding Aging", key: "A", run: () => push(agingScreen())},
-  {label: "Stock Summary", key: "S", run: () => push(simpleReport("Stock Summary", "/api/stock-summary", stockTable))},
   {section: "Utilities"},
   {label: "Account & Data", key: "F12", run: () => settingsModal()},
 ];
@@ -1019,7 +1142,7 @@ function voucherTable(rows) {
         <td><span class="pill">${esc(v.type)}</span>${v.isnew ? ` <span class="pill" style="background:#ffe08a;border-color:#e8c25a">NEW</span>` : ""}</td>
         <td class="num">${esc(v.number)}</td>
         <td class="num">${money(v.amount)}</td>
-        <td>${v.remoteid ? `<button class="btn danger" style="padding:2px 8px;font-size:11px"
+        <td>${v.isnew ? `<button class="btn danger" style="padding:2px 8px;font-size:11px"
               data-del='${esc(JSON.stringify({remoteid: v.remoteid, vchkey: v.vchkey, vchtype: v.vchtype, number: v.number}))}'>Del</button>` : ""}</td>
       </tr>
       <tr id="ent-${i}" style="display:none"><td colspan="6" class="entries">
@@ -1407,7 +1530,7 @@ function columnarLedgerTable(rows, ledgerName, openingVal) {
         <td class="num cr">${!isDr ? money(absAmt) : ""}</td>
         <td class="num ${running < 0 ? "dr" : "cr"}">${money(Math.abs(running))} ${running < 0 ? "Dr" : running > 0 ? "Cr" : ""}</td>
         <td>
-          ${v.remoteid ? `<button class="btn danger" style="padding:2px 8px;font-size:11px"
+          ${v.isnew ? `<button class="btn danger" style="padding:2px 8px;font-size:11px"
                 data-del='${esc(JSON.stringify({remoteid: v.remoteid, vchkey: v.vchkey, vchtype: v.vchtype, number: v.number}))}'>Del</button>` : ""}
         </td>
       </tr>
@@ -1441,7 +1564,6 @@ function ledVchScreen(ledger) {
       d.className = "report";
       d.innerHTML = reportBar(
         `<input class="rled" list="ledDL" placeholder="Ledger…" style="width:220px" value="${esc(ledger)}">
-         <datalist id="ledDL">${S.ledgers.map(l => `<option value="${esc(l.name)}">`).join("")}</datalist>
          <div class="search-box-wrap" style="margin-left: 10px;"><input class="rsearch" placeholder="Search vouchers…"></div>`
       );
       el.appendChild(d);
@@ -2142,7 +2264,7 @@ function voucherScreen(vtype) {
 }
 
 function flashTitle(msg) {
-  const t = $("screenTitle"), old = t.textContent;
+  const t = $("screenTitle");
   t.textContent = msg; t.style.background = "#1f6e44";
   setTimeout(() => { t.style.background = ""; render(); }, 1600);
 }
@@ -2151,6 +2273,11 @@ function flashTitle(msg) {
 let acBox = null;
 function killAC() { if (acBox) { acBox.remove(); acBox = null; } }
 function attachAC(input, scr) {
+  if (!window.acListenersWired) {
+    window.acListenersWired = true;
+    window.addEventListener("scroll", killAC, { capture: true, passive: true });
+    window.addEventListener("resize", killAC, { passive: true });
+  }
   let sel = 0, list = [];
   const paint = () => {
     if (!acBox) return;
@@ -2252,7 +2379,7 @@ function importModal(firstRun = false) {
        <b>Masters</b> — Gateway of Tally → Alt+E → Masters → Format <b>XML</b> → All Masters<br>
        <b>Transactions</b> — Gateway of Tally → Alt+E → Transactions → Format <b>XML</b>,
        period = full year (or Day Book → Alt+E)<br>
-       Send the .xml files to this Mac (AirDrop / WhatsApp / Drive) and select them below.
+       Send the .xml files to this device (via AirDrop, WhatsApp, Google Drive, etc.) and select them below.
      </div>
      <label>Tally XML export files (you can select both at once)</label>
      <input type="file" id="impFiles" multiple accept=".xml,text/xml">
@@ -2319,8 +2446,7 @@ async function settingsModal() {
        <button class="btn" id="cExport">Export new vouchers</button>
        <button class="btn danger" id="cReset">Clear all data</button>
      </div>
-     <div class="note">Your data is stored in your Supabase project and is private
-       to this login (Row Level Security).</div>`,
+     <div class="note">Your data is stored in your Supabase project. Access can be secured by setting an APP_PIN in config.js.</div>`,
     `<button class="btn danger" id="cLock">Lock app</button>
      <button class="btn" id="mNo">Close</button>
      <button class="btn gold" id="mYes">Save</button>`,
@@ -2337,8 +2463,12 @@ async function settingsModal() {
         sessionStorage.removeItem("tw_auth");
         closeModal(); boot();
       };
-      $("mYes").onclick = () => {
-        localStorage.setItem("tw_company", $("cCompName").value.trim());
+      $("mYes").onclick = async () => {
+        const name = $("cCompName").value.trim();
+        localStorage.setItem("tw_company", name);
+        try {
+          await sb.from("config").upsert({key: "company_name", value: name});
+        } catch (e) {}
         closeModal(); boot();
       };
     });
@@ -2372,8 +2502,8 @@ function periodModal() {
 /* ------------------------------------------------------------ keyboard --- */
 document.addEventListener("keydown", (e) => {
   if (!$("modal").classList.contains("hidden")) {
+    if (modalKeyHandler && modalKeyHandler(e)) { e.preventDefault(); return; }
     if (e.key === "Escape") { closeModal(); e.preventDefault(); }
-    else if (modalKeyHandler && modalKeyHandler(e)) e.preventDefault();
     return;
   }
   const fkeys = {F4: "Contra", F5: "Payment", F6: "Receipt", F7: "Journal", F8: "Sales", F9: "Purchase"};
@@ -2412,7 +2542,9 @@ async function loadMasters(flash) {
   try {
     const [led, grp] = await Promise.all([api("/api/ledgers"), api("/api/groups")]);
     S.ledgers = led; S.groups = grp;
-    if (flash) flashTitle(`✓ Reloaded ${led.length} ledgers from Tally`);
+    const dl = $("ledDL");
+    if (dl) dl.innerHTML = led.map(l => `<option value="${esc(l.name)}">`).join("");
+    if (flash) flashTitle(`✓ Reloaded ${led.length} ledgers from database`);
   } catch (e) { /* shown via conn status */ }
 }
 
@@ -2422,13 +2554,13 @@ function authScreen() {
   openModal("Tally Web",
     `<div class="note" style="margin-top:0;text-align:center;font-size:15px">Enter PIN</div>
      <input id="aPin" type="password" inputmode="numeric" maxlength="10"
-       style="text-align:center;font-size:22px;letter-spacing:8px;margin-top:8px">
+        style="text-align:center;font-size:22px;letter-spacing:8px;margin-top:8px">
      <div id="aMsg" class="note" style="color:var(--dr)"></div>`,
     `<button class="btn gold" id="aIn" style="width:100%">Open →</button>`,
     () => {
       $("aPin").focus();
       const go = () => {
-        if ($("aPin").value.trim() === pin) { sessionStorage.setItem("tw_auth","1"); closeModal(); }
+        if ($("aPin").value.trim() === pin) { sessionStorage.setItem("tw_auth","1"); closeModal(); boot(); }
         else { $("aMsg").textContent = "Wrong PIN"; $("aPin").value = ""; $("aPin").focus(); }
       };
       $("aIn").onclick = go;
@@ -2454,11 +2586,28 @@ async function boot() {
   let st = null;
   try {
     st = await api("/api/data-status");
-    $("companyName").textContent = st.company || "Tally Web";
+    
+    let companyName = st.company;
+    if (!companyName) {
+      try {
+        const {data} = await sb.from("config").select("value").eq("key", "company_name").maybeSingle();
+        if (data && data.value) {
+          companyName = data.value;
+          localStorage.setItem("tw_company", companyName);
+        }
+      } catch (e) {}
+    }
+    $("companyName").textContent = companyName || "Tally Web";
+    
     $("conn").className = "conn " + (st.vouchers || st.ledgers ? "ok" : "bad");
-    $("connText").textContent = st.vouchers || st.ledgers
+    let connMsg = st.vouchers || st.ledgers
       ? `cloud · ${st.ledgers} ledgers · ${st.vouchers} vch`
       : "no data loaded — press O";
+    if (st.blank_parents > 0) {
+      connMsg += ` · ⚠️ ${st.blank_parents} unmapped (Suspense)`;
+    }
+    $("connText").textContent = connMsg;
+    
     await loadMasters();
     if (!st.ledgers && !st.vouchers && S.stack.length <= 1) {
       setTimeout(() => importModal(true), 300);
