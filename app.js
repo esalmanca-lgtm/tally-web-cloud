@@ -3221,10 +3221,15 @@ function renderRegisterTable(vouchers, type) {
 
     if (acctLedgers.length === 0 && nonPartyGST.length > 0) {
       nonPartyGST.sort((a, b) => Math.abs(b.amt) - Math.abs(a.amt));
-      const biggest = nonPartyGST[0];
-      gstAmt -= biggest.amt;
-      taxableAmt += biggest.amt;
-      acctLedgers.push(biggest.ledger);
+      const biggestLedger = nonPartyGST[0].ledger;
+      
+      nonPartyGST.forEach(item => {
+        if (item.ledger === biggestLedger) {
+          gstAmt -= item.amt;
+          taxableAmt += item.amt;
+        }
+      });
+      acctLedgers.push(biggestLedger);
     }
     
     const gross = partyAmt || v.amount;
