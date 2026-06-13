@@ -2745,6 +2745,7 @@ function columnarLedgerTable(rows, ledgerName, openingVal) {
       <tr id="ent-${i}" style="display:none"><td colspan="8" class="entries">
         ${v.entries.map((en) => `<div><span>${esc(en.ledger)}</span>
           <span class="${en.side === "Dr" ? "dr" : "cr"}">${money(en.amount)} ${en.side}</span></div>`).join("")}
+        ${v.narration ? `<div style="margin-top:6px;justify-content:flex-start">⤷ ${esc(v.narration)}</div>` : ""}
       </td></tr>
     `;
   });
